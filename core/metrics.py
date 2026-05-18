@@ -175,29 +175,29 @@ def decision_rationale(factor_values: list[int]) -> str:
     parts = []
 
     if data <= 2:
-        parts.append("Labeled data is scarce — fine-tuning requires thousands of examples.")
+        parts.append("Labeled data is scarce  fine-tuning requires thousands of examples.")
     elif data >= 4:
         parts.append("Sufficient labeled data is available to support fine-tuning.")
 
     if spec <= 2:
-        parts.append("The task is generic — pre-trained models cover this distribution well.")
+        parts.append("The task is generic  pre-trained models cover this distribution well.")
     elif spec >= 4:
-        parts.append("The task is domain-specific — pre-trained baselines may underperform significantly.")
+        parts.append("The task is domain-specific  pre-trained baselines may underperform significantly.")
 
     if compute <= 2:
-        parts.append("Compute is limited — fine-tuning (10–40 min per run, multiple HPO runs) may not be feasible.")
+        parts.append("Compute is limited  fine-tuning (10–40 min per run, multiple HPO runs) may not be feasible.")
     elif compute >= 4:
         parts.append("Ample compute is available, making training runs feasible.")
 
     if speed <= 2:
-        parts.append("Fast iteration is needed — pre-trained inference can be swapped overnight vs. days per training run.")
+        parts.append("Fast iteration is needed pre-trained inference can be swapped overnight vs. days per training run.")
     elif speed >= 4:
         parts.append("The project can accommodate multi-day training iterations.")
 
     if gap <= 2:
         parts.append("The pre-trained baseline already meets or nearly meets the quality target.")
     elif gap >= 4:
-        parts.append("There is a significant quality gap — fine-tuning could close it by 10+ percentage points.")
+        parts.append("There is a significant quality gap  fine-tuning could close it by 10+ percentage points.")
 
     if not parts:
         parts.append(
