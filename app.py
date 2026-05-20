@@ -24,6 +24,11 @@ from core.models    import (
 from core.utils     import extract_numbers, highlight_context, normalize_answer
 from data.examples  import DECISION_FACTORS, QA_EXAMPLES, SUMM_EXAMPLES
 
+from core.models import _is_groq
+if _is_groq():
+    st.success("✅ يعمل على Groq API")
+else:
+    st.warning("⚠️ يعمل محلياً — تحقق من GROQ_API_KEY")
   
 
 # ─── Page config ────────────────────────────────────────────────────────────
