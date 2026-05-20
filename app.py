@@ -20,6 +20,7 @@ from transformers import (
 )
 from transformers.pipelines import QuestionAnsweringPipeline, SummarizationPipeline
 
+st.write("App loaded successfully")
 load_dotenv()
 
 # ─── Available models ────────────────────────────────────────────────────────
