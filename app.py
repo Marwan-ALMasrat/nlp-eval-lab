@@ -476,17 +476,33 @@ with tab_summ:
     # CORPUS EVALUATION MODE
     # ════════════════════════════════════════════════════════════════════════
     else:
-        st.markdown("##### Upload a CSV to evaluate")
+        st.markdown("##### Upload your CSV files")
         st.caption(
-            "Required columns: `article_id`, `text`, `reference_summary`. "
-            "The pipeline will summarize each article and compute ROUGE against the reference."
+            "Articles CSV: `article_id`, `text`. "
+            "References CSV: `article_id`, `reference_summary`."
         )
 
-        uploaded_summ = st.file_uploader("Choose a CSV file", type=["csv"], key="summ_batch_upload")
+        col_a, col_b = st.columns(2)
 
-        if uploaded_summ is not None:
+        with col_a:
+            st.markdown('<div class="section-label">Articles CSV</div>', unsafe_allow_html=True)
+            uploaded_articles = st.file_uploader(
+                "Articles", type=["csv"], key="summ_articles_upload",
+                label_visibility="collapsed",
+            )
+
+        with col_b:
+            st.markdown('<div class="section-label">Reference Summaries CSV</div>', unsafe_allow_html=True)
+            uploaded_refs = st.file_uploader(
+                "References", type=["csv"], key="summ_refs_upload",
+                label_visibility="collapsed",
+            )
+
+        if uploaded_articles is not None and uploaded_refs is not None:
             try:
-                summ_df = pd.read_csv(uploaded_summ)
+                articles_df = pd.read_csv(uploaded_articles)
+                refs_df     = pd.read_csv(uploaded_refs)
+                summ_df     = articles_df.merge(refs_df, on="article_id")
             except Exception as e:
                 st.error(f"Could not read CSV: {e}")
                 summ_df = None
@@ -568,6 +584,11 @@ with tab_summ:
                             "`scorer.score(reference, predicted)` — reference first. "
                             "Model: `sshleifer/distilbart-cnn-6-6`."
                         )
+
+        elif uploaded_articles is not None and uploaded_refs is None:
+            st.info("Please upload the reference summaries CSV.")
+        elif uploaded_refs is not None and uploaded_articles is None:
+            st.info("Please upload the articles CSV.")
 
 
 # ════════════════════════════════════════════════════════════════════════════
