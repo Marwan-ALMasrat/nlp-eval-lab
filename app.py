@@ -30,7 +30,7 @@ st.write("Testing CSS...")
 
 st.write("CSS passed")
 st.write("Testing sidebar...")
-
+st.write("Testing header...")
 load_dotenv()
 
 # ─── Available models ────────────────────────────────────────────────────────
