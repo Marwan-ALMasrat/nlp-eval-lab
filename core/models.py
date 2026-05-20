@@ -2,7 +2,7 @@
 core/models.py
 ──────────────
 Model loading with dynamic model selection.
-Priority: Groq API (with key rotation) → HuggingFace API → Local CPU
+Priority: Groq API (with key rotation) → Gemini 2.0 Flash → HuggingFace API → Local CPU
 """
 
 import os
@@ -57,9 +57,10 @@ SUMM_MODELS = {
 DEFAULT_QA_MODEL   = "distilbert-base-cased-distilled-squad"
 DEFAULT_SUMM_MODEL = "sshleifer/distilbart-cnn-6-6"
 
-_HF_API_URL   = "https://router.huggingface.co/hf-inference/models"
-_GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL   = "llama-3.1-8b-instant"
+_HF_API_URL    = "https://router.huggingface.co/hf-inference/models"
+_GROQ_API_URL  = "https://api.groq.com/openai/v1/chat/completions"
+_GROQ_MODEL    = "llama-3.1-8b-instant"
+_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 
 # ─── Groq Key Rotation ───────────────────────────────────────────────────────
@@ -121,7 +122,75 @@ def _user_wants_groq() -> bool:
     return st.session_state.get("use_groq", True) and _is_groq()
 
 
-# ─── Groq POST with key rotation ─────────────────────────────────────────────
+# ─── Gemini helpers ───────────────────────────────────────────────────────────
+
+def _gemini_key() -> str:
+    try:
+        return st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        return os.environ.get("GEMINI_API_KEY", "")
+
+
+def _is_gemini() -> bool:
+    return bool(_gemini_key())
+
+
+def _gemini_post(prompt: str, timeout: int = 20) -> str:
+    """POST to Gemini 2.0 Flash and return the text response."""
+    key = _gemini_key()
+    if not key:
+        raise RuntimeError("No GEMINI_API_KEY found in Secrets.")
+
+    response = requests.post(
+        f"{_GEMINI_API_URL}?key={key}",
+        headers={"Content-Type": "application/json"},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 300},
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+def _gemini_qa(question: str, context: str) -> dict:
+    prompt = f"""You are a precise question-answering assistant.
+Extract the answer to the question from the context below.
+Return ONLY a JSON object with these fields:
+- "answer": the exact answer string extracted from the context
+- "score": confidence float between 0 and 1
+
+Context: {context}
+
+Question: {question}
+
+Respond with JSON only, no explanation."""
+
+    content = _gemini_post(prompt)
+    content = re.sub(r"```json|```", "", content).strip()
+    result  = json.loads(content)
+
+    answer = result.get("answer", "")
+    score  = float(result.get("score", 0.9))
+    start  = context.find(answer)
+    if start == -1:
+        start = 0
+    end = start + len(answer)
+    return {"answer": answer, "score": score, "start": start, "end": end}
+
+
+def _gemini_summarize(text: str) -> str:
+    prompt = f"""Summarize the following article in 2-3 concise sentences.
+Return only the summary, no preamble or explanation.
+
+Article:
+{text}
+
+Summary:"""
+
+    return _gemini_post(prompt, timeout=30)
 
 def _groq_post(payload: dict, timeout: int = 15) -> dict:
     """
@@ -327,7 +396,13 @@ def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dic
         except RuntimeError as e:
             st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq failed ({e}) — falling back to local.")
+            st.warning(f"Groq failed ({e}) — trying Gemini…")
+
+    if _is_gemini():
+        try:
+            return _gemini_qa(question, context)
+        except Exception as e:
+            st.warning(f"Gemini failed ({e}) — falling back to HuggingFace.")
 
     if _is_hf_api():
         try:
@@ -346,7 +421,13 @@ def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
         except RuntimeError as e:
             st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq failed ({e}) — falling back to local.")
+            st.warning(f"Groq failed ({e}) — trying Gemini…")
+
+    if _is_gemini():
+        try:
+            return _gemini_summarize(text)
+        except Exception as e:
+            st.warning(f"Gemini failed ({e}) — falling back to HuggingFace.")
 
     if _is_hf_api():
         try:
