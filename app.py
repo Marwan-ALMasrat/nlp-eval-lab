@@ -51,6 +51,20 @@ with tab_decision:
     st.write("tab_decision works!")
 
 st.write("All tabs done!")
+with tab_qa:
+    st.write("step 1 - markdown")
+    st.markdown("#### Extractive QA")
+    st.write("step 2 - caption")
+    st.caption("Encoder-only transformer...")
+    st.write("step 3 - model selector")
+    if st.session_state.get("use_groq"):
+        selected_qa_model = list(QA_MODELS.keys())[0]
+        st.markdown('<div class="model-badge">⚡ Groq</div>', unsafe_allow_html=True)
+    else:
+        selected_qa_model = st.selectbox("Select QA model", options=list(QA_MODELS.keys()))
+    st.write("step 4 - mode radio")
+    mode = st.radio("Mode", ["Single Question", "Batch Evaluation"], horizontal=True)
+    st.write("step 5 - done")
 load_dotenv()
 
 # ─── Available models ────────────────────────────────────────────────────────
