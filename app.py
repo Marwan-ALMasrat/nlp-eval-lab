@@ -24,6 +24,10 @@ from core.models    import (
 from core.utils     import extract_numbers, highlight_context, normalize_answer
 from data.examples  import DECISION_FACTORS, QA_EXAMPLES, SUMM_EXAMPLES
 
+import streamlit as st
+token = st.secrets.get("HF_TOKEN", "NOT FOUND")
+st.write(f"Token starts with: {token[:10] if token != 'NOT FOUND' else 'NOT FOUND'}")
+
 
 # ─── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
