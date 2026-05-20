@@ -38,6 +38,19 @@ tab_qa, tab_summ, tab_decision = st.tabs([
     "⚖️  Decision Matrix",
 ])
 st.write("Tabs created!")
+st.write("Testing tab_qa content...")
+with tab_qa:
+    st.write("tab_qa works!")
+
+st.write("Testing tab_summ content...")
+with tab_summ:
+    st.write("tab_summ works!")
+
+st.write("Testing tab_decision content...")
+with tab_decision:
+    st.write("tab_decision works!")
+
+st.write("All tabs done!")
 load_dotenv()
 
 # ─── Available models ────────────────────────────────────────────────────────
