@@ -35,6 +35,18 @@ try:
 except Exception as e:
     st.write(f"Connection failed: {e}")
 
+try:
+    r = requests.get("https://huggingface.co", timeout=5)
+    st.write(f"HuggingFace main: {r.status_code}")
+except Exception as e:
+    st.write(f"HuggingFace main failed: {e}")
+
+try:
+    r = requests.get("https://google.com", timeout=5)
+    st.write(f"Google: {r.status_code}")
+except Exception as e:
+    st.write(f"Google failed: {e}")    
+
 # ─── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="NLP Evaluation Lab — Module 7 Week B",
