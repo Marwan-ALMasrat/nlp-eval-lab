@@ -2,8 +2,7 @@
 core/models.py
 ──────────────
 Model loading with dynamic model selection.
-Priority: Groq API → HuggingFace API → Local CPU
-الخيار يُقرأ من st.session_state["use_groq"] الذي يضبطه المستخدم من الـ sidebar.
+Priority: Groq API (with key rotation) → HuggingFace API → Local CPU
 """
 
 import os
@@ -62,51 +61,89 @@ _HF_API_URL   = "https://router.huggingface.co/hf-inference/models"
 _GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL   = "llama-3.1-8b-instant"
 
-# حد الطلبات: انتظر هذه المدة بين كل طلب وآخر (بالثواني)
-_GROQ_MIN_INTERVAL = 2.0
+
+# ─── Groq Key Rotation ───────────────────────────────────────────────────────
+
+def _load_groq_keys() -> list:
+    """
+    يحمّل كل مفاتيح Groq المتاحة من Secrets أو .env.
+    يدعم:
+      GROQ_API_KEY        (مفتاح واحد — للتوافق مع القديم)
+      GROQ_API_KEY_1 ... GROQ_API_KEY_N  (مفاتيح متعددة)
+    """
+    keys = []
+    # مفاتيح مرقّمة: GROQ_API_KEY_1, _2, ...
+    for i in range(1, 20):
+        try:
+            k = st.secrets.get(f"GROQ_API_KEY_{i}", "")
+        except Exception:
+            k = os.environ.get(f"GROQ_API_KEY_{i}", "")
+        if k:
+            keys.append(k)
+
+    # مفتاح واحد غير مرقّم كاحتياطي
+    if not keys:
+        try:
+            k = st.secrets.get("GROQ_API_KEY", "")
+        except Exception:
+            k = os.environ.get("GROQ_API_KEY", "")
+        if k:
+            keys.append(k)
+
+    return keys
 
 
-# ─── Credentials ─────────────────────────────────────────────────────────────
-
-def _groq_key() -> str:
-    try:
-        return st.secrets.get("GROQ_API_KEY", "")
-    except Exception:
-        return os.environ.get("GROQ_API_KEY", "")
+def _get_current_key_index() -> int:
+    """يقرأ المؤشر الحالي من session_state."""
+    return st.session_state.get("groq_key_index", 0)
 
 
-def _hf_token() -> str:
-    try:
-        return st.secrets.get("HF_TOKEN", "")
-    except Exception:
-        return os.environ.get("HF_TOKEN", "")
+def _rotate_key(keys: list) -> int:
+    """ينتقل للمفتاح التالي ويعيد الإندكس الجديد."""
+    current = _get_current_key_index()
+    next_index = (current + 1) % len(keys)
+    st.session_state["groq_key_index"] = next_index
+    return next_index
 
 
 def _is_groq() -> bool:
-    return bool(_groq_key())
+    return len(_load_groq_keys()) > 0
 
 
 def _is_hf_api() -> bool:
-    return bool(_hf_token())
+    try:
+        return bool(st.secrets.get("HF_TOKEN", ""))
+    except Exception:
+        return bool(os.environ.get("HF_TOKEN", ""))
 
 
 def _user_wants_groq() -> bool:
     return st.session_state.get("use_groq", True) and _is_groq()
 
 
-# ─── Rate limit helper ───────────────────────────────────────────────────────
+# ─── Groq POST with key rotation ─────────────────────────────────────────────
 
 def _groq_post(payload: dict, timeout: int = 15) -> dict:
     """
-    POST to Groq with automatic retry on 429.
-    يحترم Retry-After header إذا وُجد، وإلا ينتظر تصاعدياً.
+    POST إلى Groq مع:
+    - تدوير المفاتيح تلقائياً عند 429
+    - إعادة المحاولة مع انتظار تصاعدي
     """
-    wait = _GROQ_MIN_INTERVAL
-    for attempt in range(4):
+    keys = _load_groq_keys()
+    if not keys:
+        raise RuntimeError("لا يوجد GROQ_API_KEY في Secrets.")
+
+    total_attempts = len(keys) * 2  # حاول كل مفتاح مرتين
+    wait = 2.0
+
+    for attempt in range(total_attempts):
+        idx = _get_current_key_index() % len(keys)
+        key = keys[idx]
+
         response = requests.post(
             _GROQ_API_URL,
             headers={
-                "Authorization": f"Bearer {_groq_key()}",
+                "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -114,25 +151,36 @@ def _groq_post(payload: dict, timeout: int = 15) -> dict:
         )
 
         if response.status_code == 429:
-            # اقرأ Retry-After من الـ header إذا وُجد
-            retry_after = response.headers.get("Retry-After") or response.headers.get("x-ratelimit-reset-requests")
+            new_idx = _rotate_key(keys)
+            retry_after = response.headers.get("Retry-After", "")
             if retry_after:
                 try:
                     wait = float(retry_after)
                 except ValueError:
                     pass
-            st.info(f"⏳ Groq rate limit — انتظر {wait:.0f}s ثم أعيد المحاولة… (محاولة {attempt+1}/4)")
-            time.sleep(wait)
-            wait = min(wait * 2, 60)  # تضاعف الانتظار حتى 60 ثانية
+
+            if len(keys) > 1:
+                st.info(
+                    f"⚡ المفتاح {idx+1} وصل للحد — تبديل للمفتاح {new_idx+1}/{len(keys)}…"
+                )
+                # لا ننتظر عند التبديل — المفتاح الجديد جاهز فوراً
+                time.sleep(0.3)
+            else:
+                st.info(f"⏳ Groq rate limit — انتظر {wait:.0f}s… (محاولة {attempt+1}/{total_attempts})")
+                time.sleep(wait)
+                wait = min(wait * 2, 60)
             continue
 
         response.raise_for_status()
         return response.json()
 
-    raise RuntimeError("Groq API: تجاوزت حد الطلبات بعد 4 محاولات. حاول لاحقاً.")
+    raise RuntimeError(
+        f"Groq: انتهت كل المحاولات على {len(keys)} مفتاح/مفاتيح. "
+        "أضف مفاتيح إضافية أو انتظر دقيقة."
+    )
 
 
-# ─── Groq API ────────────────────────────────────────────────────────────────
+# ─── Groq inference ──────────────────────────────────────────────────────────
 
 def _groq_qa(question: str, context: str) -> dict:
     prompt = f"""You are a precise question-answering assistant.
@@ -163,7 +211,6 @@ Respond with JSON only, no explanation."""
     if start == -1:
         start = 0
     end = start + len(answer)
-
     return {"answer": answer, "score": score, "start": start, "end": end}
 
 
@@ -187,6 +234,13 @@ Summary:"""
 
 # ─── HuggingFace API ─────────────────────────────────────────────────────────
 
+def _hf_token() -> str:
+    try:
+        return st.secrets.get("HF_TOKEN", "")
+    except Exception:
+        return os.environ.get("HF_TOKEN", "")
+
+
 def _hf_headers() -> dict:
     return {"Authorization": f"Bearer {_hf_token()}"}
 
@@ -202,7 +256,7 @@ def _hf_qa(question: str, context: str, model_id: str) -> dict:
         data = response.json()
         if isinstance(data, dict) and "error" in data and "loading" in data.get("error", "").lower():
             wait = data.get("estimated_time", 20)
-            st.info(f"Model loading on HuggingFace servers — retrying in {int(wait)}s…")
+            st.info(f"Model loading on HuggingFace — retrying in {int(wait)}s…")
             time.sleep(wait)
             continue
         response.raise_for_status()
@@ -223,10 +277,8 @@ def _hf_summarize(text: str, model_id: str) -> str:
             json={
                 "inputs": text,
                 "parameters": {
-                    "max_length": 80,
-                    "min_length": 20,
-                    "num_beams":  4,
-                    "no_repeat_ngram_size": 3,
+                    "max_length": 80, "min_length": 20,
+                    "num_beams": 4, "no_repeat_ngram_size": 3,
                 },
             },
             timeout=60,
@@ -234,7 +286,7 @@ def _hf_summarize(text: str, model_id: str) -> str:
         data = response.json()
         if isinstance(data, dict) and "error" in data and "loading" in data.get("error", "").lower():
             wait = data.get("estimated_time", 20)
-            st.info(f"Model loading on HuggingFace servers — retrying in {int(wait)}s…")
+            st.info(f"Model loading on HuggingFace — retrying in {int(wait)}s…")
             time.sleep(wait)
             continue
         response.raise_for_status()
@@ -267,7 +319,7 @@ def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dic
         except RuntimeError as e:
             st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq فشل ({e}) — جاري المحاولة محلياً.")
+            st.warning(f"Groq فشل ({e}) — جاري التشغيل محلياً.")
 
     if _is_hf_api():
         try:
@@ -286,7 +338,7 @@ def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
         except RuntimeError as e:
             st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq فشل ({e}) — جاري المحاولة محلياً.")
+            st.warning(f"Groq فشل ({e}) — جاري التشغيل محلياً.")
 
     if _is_hf_api():
         try:
