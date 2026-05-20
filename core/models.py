@@ -1,749 +1,447 @@
 """
-app.py
-──────
-Streamlit UI layer — the only file that imports streamlit.
-All AI inference lives in core/models.py.
-All metric computation lives in core/metrics.py.
-All text helpers live in core/utils.py.
-All examples live in data/examples.py.
-Batch evaluation logic lives in core/evaluator.py.
-
-Run:
-    streamlit run app.py
+core/models.py
+──────────────
+Model loading with dynamic model selection.
+Priority: Groq API (with key rotation) → Gemini 2.0 Flash → HuggingFace API → Local CPU
 """
 
-import pandas as pd
+import os
+import re
+import json
+import time
+
+import requests
 import streamlit as st
-
-from core.evaluator import evaluate_batch, evaluate_summaries
-from core.metrics   import decision_rationale, decision_score, qa_metrics, rouge_scores
-from core.models    import (
-    QA_MODELS, SUMM_MODELS,
-    run_qa, run_summarization,
-    _is_groq,
+from dotenv import load_dotenv
+from transformers import (
+    AutoModelForQuestionAnswering,
+    AutoModelForSeq2SeqLM,
+    AutoTokenizer,
 )
-from core.utils     import extract_numbers, highlight_context, normalize_answer
-from data.examples  import DECISION_FACTORS, QA_EXAMPLES, SUMM_EXAMPLES
+from transformers.pipelines import QuestionAnsweringPipeline, SummarizationPipeline
 
-# ─── Page config ────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="NLP Evaluation Lab — Module 7 Week B",
-    page_icon="🧪",
-    layout="wide",
-)
+load_dotenv()
 
-# ─── CSS ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-.lab-header {
-    display: flex; align-items: center; gap: 10px;
-    padding: 0.5rem 0 1.2rem 0;
-    border-bottom: 1px solid rgba(0,0,0,0.08);
-    margin-bottom: 1.5rem;
-}
-.lab-title  { font-size: 20px; font-weight: 500; margin: 0; }
-.lab-badge  { background:#eeedfe; color:#534ab7; font-size:11px; font-weight:500; padding:2px 10px; border-radius:20px; }
-.lab-sub    { color:#888780; font-size:13px; margin-left:auto; }
+# ─── Available models ────────────────────────────────────────────────────────
 
-.metric-card {
-    background:#f1efe8; border-radius:8px;
-    padding:10px 16px; text-align:center; flex:1;
-}
-.metric-label { font-size:11px; color:#888780; margin-bottom:4px; }
-.metric-value { font-size:24px; font-weight:500; }
-.metric-sub   { font-size:11px; color:#888780; margin-top:2px; }
-
-.batch-metric-card {
-    background:#eeedfe; border-radius:8px;
-    padding:14px 16px; text-align:center; flex:1;
+QA_MODELS = {
+    "distilbert-base-cased-distilled-squad": {
+        "label":       "DistilBERT · SQuAD v1.1 (fast, 65MB)",
+        "description": "Encoder-only. Always returns an answer. Best for speed.",
+    },
+    "deepset/roberta-base-squad2": {
+        "label":       "RoBERTa · SQuAD v2.0 (stronger, 125MB)",
+        "description": "Supports 'no answer' prediction. Better on harder questions.",
+    },
+    "deepset/deberta-v3-base-squad2": {
+        "label":       "DeBERTa · SQuAD v2.0 (best quality, 180MB)",
+        "description": "Highest accuracy. Slower on CPU.",
+    },
 }
 
-.summ-metric-card {
-    background:#e1f5ee; border-radius:8px;
-    padding:14px 16px; text-align:center; flex:1;
+SUMM_MODELS = {
+    "sshleifer/distilbart-cnn-6-6": {
+        "label":       "DistilBART CNN (fast, 230MB)",
+        "description": "Distilled BART. Fast on CPU. May repeat n-grams.",
+    },
+    "facebook/bart-large-cnn": {
+        "label":       "BART Large CNN (best quality, 400MB)",
+        "description": "Full BART fine-tuned on CNN/DM. Highest ROUGE scores.",
+    },
+    "google/pegasus-xsum": {
+        "label":       "PEGASUS XSum (concise summaries, 570MB)",
+        "description": "Trained on XSum. Produces shorter, more abstractive summaries.",
+    },
 }
 
-.answer-box {
-    background:#e1f5ee; border:1px solid #0f6e56;
-    border-radius:8px; padding:10px 14px;
-    font-size:15px; font-weight:500; color:#0f6e56; margin:8px 0;
-}
-.norm-trace {
-    background:#f1efe8; border-radius:8px;
-    padding:10px 12px; font-family:monospace; font-size:12px; margin:6px 0;
-}
-.rouge-row   { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
-.rouge-label { font-size:12px; width:68px; color:#5f5e5a; flex-shrink:0; }
-.rouge-track { flex:1; height:6px; background:#f1efe8; border-radius:3px; overflow:hidden; }
-.rouge-fill  { height:100%; background:#534ab7; border-radius:3px; }
-.rouge-val   { font-size:12px; font-weight:500; width:40px; text-align:right; }
+DEFAULT_QA_MODEL   = "distilbert-base-cased-distilled-squad"
+DEFAULT_SUMM_MODEL = "sshleifer/distilbart-cnn-6-6"
 
-.faith-found   { background:#e1f5ee; color:#0f6e56; border-radius:4px; padding:2px 8px; font-size:12px; font-weight:500; display:inline-block; margin:2px; }
-.faith-missing { background:#faece7; color:#993c1d; border-radius:4px; padding:2px 8px; font-size:12px; font-weight:500; display:inline-block; margin:2px; }
-
-.ctx-text { font-size:13px; line-height:1.8; background:#f1efe8; border-radius:8px; padding:10px 12px; }
-mark { background:#faeeda; color:#854f0b; border-radius:3px; padding:1px 3px; font-weight:500; }
-
-.section-label { font-size:11px; font-weight:500; text-transform:uppercase; letter-spacing:0.06em; color:#888780; margin-bottom:4px; }
-
-.rec-pretrained { background:#e1f5ee; border-radius:12px; padding:1rem 1.25rem; }
-.rec-borderline { background:#faeeda; border-radius:12px; padding:1rem 1.25rem; }
-.rec-finetune   { background:#eeedfe; border-radius:12px; padding:1rem 1.25rem; }
-
-.model-badge {
-    background:#f1efe8; border-radius:6px;
-    padding:6px 12px; font-size:12px;
-    color:#5f5e5a; margin-bottom:8px;
-    display:inline-block;
-}
-</style>
-""", unsafe_allow_html=True)
+_HF_API_URL    = "https://router.huggingface.co/hf-inference/models"
+_GROQ_API_URL  = "https://api.groq.com/openai/v1/chat/completions"
+_GROQ_MODEL    = "llama-3.1-8b-instant"
+_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 
-# ─── Sidebar — Inference backend selector ───────────────────────────────────
-with st.sidebar:
-    st.markdown("### ⚙️ Inference Backend")
+# ─── Groq Key Rotation ───────────────────────────────────────────────────────
 
-    groq_available = _is_groq()
+def _load_groq_keys() -> list:
+    """
+    Loads all available Groq keys from Secrets or .env.
+    Supports:
+      GROQ_API_KEY        (single key — backwards compatible)
+      GROQ_API_KEY_1 ... GROQ_API_KEY_N  (multiple keys)
+    """
+    keys = []
+    # Numbered keys: GROQ_API_KEY_1, _2, ...
+    for i in range(1, 20):
+        try:
+            k = st.secrets.get(f"GROQ_API_KEY_{i}", "")
+        except Exception:
+            k = os.environ.get(f"GROQ_API_KEY_{i}", "")
+        if k:
+            keys.append(k)
 
-    show_selector = st.toggle("Show backend selector", value=True, key="show_backend")
+    # Single unnumbered key as fallback
+    if not keys:
+        try:
+            k = st.secrets.get("GROQ_API_KEY", "")
+        except Exception:
+            k = os.environ.get("GROQ_API_KEY", "")
+        if k:
+            keys.append(k)
 
-    if show_selector:
-        if groq_available:
-            backend = st.radio(
-                "Choose backend:",
-                ["⚡ Groq API (fast)", "🖥️ Local CPU (slow)"],
-                index=0,
-                key="backend_select",
-            )
-            use_groq = backend == "⚡ Groq API (fast)"
+    return keys
 
-            if use_groq:
-                st.success("✅ Groq API — under 1 second")
+
+def _get_current_key_index() -> int:
+    """Returns current key index from session_state."""
+    return st.session_state.get("groq_key_index", 0)
+
+
+def _rotate_key(keys: list) -> int:
+    """Moves to the next key and returns the new index."""
+    current = _get_current_key_index()
+    next_index = (current + 1) % len(keys)
+    st.session_state["groq_key_index"] = next_index
+    return next_index
+
+
+def _is_groq() -> bool:
+    return len(_load_groq_keys()) > 0
+
+
+def _is_hf_api() -> bool:
+    try:
+        return bool(st.secrets.get("HF_TOKEN", ""))
+    except Exception:
+        return bool(os.environ.get("HF_TOKEN", ""))
+
+
+def _user_wants_groq() -> bool:
+    return st.session_state.get("use_groq", True) and _is_groq()
+
+
+# ─── Gemini helpers ───────────────────────────────────────────────────────────
+
+def _gemini_key() -> str:
+    try:
+        return st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        return os.environ.get("GEMINI_API_KEY", "")
+
+
+def _is_gemini() -> bool:
+    return bool(_gemini_key())
+
+
+def _gemini_post(prompt: str, timeout: int = 20) -> str:
+    """POST to Gemini 2.0 Flash and return the text response."""
+    key = _gemini_key()
+    if not key:
+        raise RuntimeError("No GEMINI_API_KEY found in Secrets.")
+
+    response = requests.post(
+        f"{_GEMINI_API_URL}?key={key}",
+        headers={"Content-Type": "application/json"},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 300},
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+def _gemini_qa(question: str, context: str) -> dict:
+    prompt = f"""You are a precise question-answering assistant.
+Extract the answer to the question from the context below.
+Return ONLY a JSON object with these fields:
+- "answer": the exact answer string extracted from the context
+- "score": confidence float between 0 and 1
+
+Context: {context}
+
+Question: {question}
+
+Respond with JSON only, no explanation."""
+
+    content = _gemini_post(prompt)
+    content = re.sub(r"```json|```", "", content).strip()
+    result  = json.loads(content)
+
+    answer = result.get("answer", "")
+    score  = float(result.get("score", 0.9))
+    start  = context.find(answer)
+    if start == -1:
+        start = 0
+    end = start + len(answer)
+    return {"answer": answer, "score": score, "start": start, "end": end}
+
+
+def _gemini_summarize(text: str) -> str:
+    prompt = f"""Summarize the following article in 2-3 concise sentences.
+Return only the summary, no preamble or explanation.
+
+Article:
+{text}
+
+Summary:"""
+
+    return _gemini_post(prompt, timeout=30)
+
+def _groq_post(payload: dict, timeout: int = 15) -> dict:
+    """
+    POST to Groq with:
+    - Automatic key rotation on 429
+    - Cycles through all keys before waiting
+    - Exponential backoff only after a full round
+    """
+    keys = _load_groq_keys()
+    if not keys:
+        raise RuntimeError("No GROQ_API_KEY found in Secrets.")
+
+    attempt      = 0
+    round_num    = 0
+    wait         = 2.0
+    MAX_ROUNDS   = 10
+
+    while round_num < MAX_ROUNDS:
+        idx      = _get_current_key_index() % len(keys)
+        key      = keys[idx]
+        attempt += 1
+
+        response = requests.post(
+            _GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+
+        if response.status_code == 429:
+            new_idx = _rotate_key(keys)
+
+            # Completed a full round through all keys
+            if new_idx == 0:
+                round_num += 1
+                retry_after = response.headers.get("Retry-After", "")
+                if retry_after:
+                    try:
+                        wait = float(retry_after)
+                    except ValueError:
+                        pass
+                st.info(
+                    f"⏳ All keys hit rate limit (round {round_num}/{MAX_ROUNDS}) — "
+                    f"waiting {wait:.0f}s before retrying…"
+                )
+                time.sleep(wait)
+                wait = min(wait * 2, 60)
             else:
-                st.warning("⚠️ Local CPU — may take minutes")
-        else:
-            st.error("❌ GROQ_API_KEY not found")
-            st.caption("Add GROQ_API_KEY in Secrets to enable Groq.")
-            use_groq = False
-    else:
-        use_groq = st.session_state.get("use_groq", groq_available)
-        current = "Groq API ⚡" if use_groq else "Local CPU 🖥️"
-        st.caption(f"Backend: **{current}**")
+                # New key available — switch immediately
+                if len(keys) > 1:
+                    st.info(f"⚡ Key {idx+1} hit rate limit — switching to key {new_idx+1}/{len(keys)}…")
+                time.sleep(0.3)
+            continue
 
-    st.session_state["use_groq"] = use_groq
+        response.raise_for_status()
+        return response.json()
 
-    st.markdown("---")
-    st.caption("Groq: runs LLaMA 3.1 8B on Groq's LPU · Local: runs DistilBERT/BART on your CPU")
-
-
-# ─── Header ─────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="lab-header">
-  <span style="font-size:24px">🧪</span>
-  <p class="lab-title">NLP Evaluation</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ─── Tabs ────────────────────────────────────────────────────────────────────
-tab_qa, tab_summ, tab_decision = st.tabs([
-    "🔍  Extractive QA",
-    "📄  Summarization",
-    "⚖️  Decision Matrix",
-])
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 1 — EXTRACTIVE QA
-# ════════════════════════════════════════════════════════════════════════════
-with tab_qa:
-    st.markdown("#### Extractive QA")
-    st.caption(
-        "Encoder-only transformer + QA head. "
-        "Span prediction: per-token start/end logits over the context. "
-        "Fine-tuned on SQuAD — every question has an answer in the context."
+    raise RuntimeError(
+        f"Groq: exhausted {MAX_ROUNDS} full rounds across {len(keys)} keys. "
+        "Wait a few minutes or add more API keys."
     )
 
-    # ── Model selector — hidden when Groq is active ──────────────────────────
-    if st.session_state.get("use_groq"):
-        selected_qa_model = list(QA_MODELS.keys())[0]
-        st.markdown(
-            '<div class="model-badge">⚡ Groq — LLaMA 3.1 8B &nbsp;|&nbsp; fallback: Gemini 2.0 Flash</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        selected_qa_model = st.selectbox(
-            "Select QA model",
-            options=list(QA_MODELS.keys()),
-            format_func=lambda x: QA_MODELS[x]["label"],
-            index=0,
-            key="qa_model_select",
-        )
-        st.caption(QA_MODELS[selected_qa_model]["description"])
 
-    st.markdown("---")
+# ─── Groq inference ──────────────────────────────────────────────────────────
 
-    mode = st.radio(
-        "Mode",
-        ["Single Question", "Batch Evaluation"],
-        horizontal=True,
-        label_visibility="collapsed",
+def _groq_qa(question: str, context: str) -> dict:
+    prompt = f"""You are a precise question-answering assistant.
+Extract the answer to the question from the context below.
+Return ONLY a JSON object with these fields:
+- "answer": the exact answer string extracted from the context
+- "score": confidence float between 0 and 1
+
+Context: {context}
+
+Question: {question}
+
+Respond with JSON only, no explanation."""
+
+    data    = _groq_post({
+        "model": _GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 200,
+    })
+    content = data["choices"][0]["message"]["content"].strip()
+    content = re.sub(r"```json|```", "", content).strip()
+    result  = json.loads(content)
+
+    answer = result.get("answer", "")
+    score  = float(result.get("score", 0.9))
+    start  = context.find(answer)
+    if start == -1:
+        start = 0
+    end = start + len(answer)
+    return {"answer": answer, "score": score, "start": start, "end": end}
+
+
+def _groq_summarize(text: str) -> str:
+    prompt = f"""Summarize the following article in 2-3 concise sentences.
+Return only the summary, no preamble or explanation.
+
+Article:
+{text}
+
+Summary:"""
+
+    data = _groq_post({
+        "model": _GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 150,
+    })
+    return data["choices"][0]["message"]["content"].strip()
+
+
+# ─── HuggingFace API ─────────────────────────────────────────────────────────
+
+def _hf_token() -> str:
+    try:
+        return st.secrets.get("HF_TOKEN", "")
+    except Exception:
+        return os.environ.get("HF_TOKEN", "")
+
+
+def _hf_headers() -> dict:
+    return {"Authorization": f"Bearer {_hf_token()}"}
+
+
+def _hf_qa(question: str, context: str, model_id: str) -> dict:
+    for attempt in range(3):
+        response = requests.post(
+            f"{_HF_API_URL}/{model_id}",
+            headers=_hf_headers(),
+            json={"inputs": {"question": question, "context": context}},
+            timeout=30,
+        )
+        data = response.json()
+        if isinstance(data, dict) and "error" in data and "loading" in data.get("error", "").lower():
+            wait = data.get("estimated_time", 20)
+            st.info(f"Model loading on HuggingFace — retrying in {int(wait)}s…")
+            time.sleep(wait)
+            continue
+        response.raise_for_status()
+        return {
+            "answer": data.get("answer", ""),
+            "score":  data.get("score", 0.0),
+            "start":  data.get("start", 0),
+            "end":    data.get("end", 0),
+        }
+    raise RuntimeError("HuggingFace API unavailable after 3 attempts.")
+
+
+def _hf_summarize(text: str, model_id: str) -> str:
+    for attempt in range(3):
+        response = requests.post(
+            f"{_HF_API_URL}/{model_id}",
+            headers=_hf_headers(),
+            json={
+                "inputs": text,
+                "parameters": {
+                    "max_length": 80, "min_length": 20,
+                    "num_beams": 4, "no_repeat_ngram_size": 3,
+                },
+            },
+            timeout=60,
+        )
+        data = response.json()
+        if isinstance(data, dict) and "error" in data and "loading" in data.get("error", "").lower():
+            wait = data.get("estimated_time", 20)
+            st.info(f"Model loading on HuggingFace — retrying in {int(wait)}s…")
+            time.sleep(wait)
+            continue
+        response.raise_for_status()
+        return data[0]["summary_text"]
+    raise RuntimeError("HuggingFace API unavailable after 3 attempts.")
+
+
+# ─── Local pipelines ─────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner="Loading QA model…")
+def _get_qa_pipeline_local(model_id: str):
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model     = AutoModelForQuestionAnswering.from_pretrained(model_id)
+    return QuestionAnsweringPipeline(model=model, tokenizer=tokenizer)
+
+
+@st.cache_resource(show_spinner="Loading summarization model…")
+def _get_summ_pipeline_local(model_id: str):
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model     = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+    return SummarizationPipeline(model=model, tokenizer=tokenizer)
+
+
+# ─── Public run functions ────────────────────────────────────────────────────
+
+def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dict:
+    if _user_wants_groq():
+        try:
+            return _groq_qa(question, context)
+        except RuntimeError as e:
+            st.warning(str(e))
+        except Exception as e:
+            st.warning(f"Groq failed ({e}) — trying Gemini…")
+
+    if _is_gemini():
+        try:
+            return _gemini_qa(question, context)
+        except Exception as e:
+            st.warning(f"Gemini failed ({e}) — falling back to HuggingFace.")
+
+    if _is_hf_api():
+        try:
+            return _hf_qa(question, context, model_id)
+        except Exception as e:
+            st.warning(f"HuggingFace failed ({e}) — falling back to local.")
+
+    pipeline = _get_qa_pipeline_local(model_id)
+    return pipeline(question=question, context=context)
+
+
+def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
+    if _user_wants_groq():
+        try:
+            return _groq_summarize(text)
+        except RuntimeError as e:
+            st.warning(str(e))
+        except Exception as e:
+            st.warning(f"Groq failed ({e}) — trying Gemini…")
+
+    if _is_gemini():
+        try:
+            return _gemini_summarize(text)
+        except Exception as e:
+            st.warning(f"Gemini failed ({e}) — falling back to HuggingFace.")
+
+    if _is_hf_api():
+        try:
+            return _hf_summarize(text, model_id)
+        except Exception as e:
+            st.warning(f"HuggingFace failed ({e}) — falling back to local.")
+
+    pipeline = _get_summ_pipeline_local(model_id)
+    out = pipeline(
+        text,
+        max_length=80,
+        min_length=20,
+        do_sample=False,
+        num_beams=4,
+        no_repeat_ngram_size=3,
     )
-    st.markdown("---")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # SINGLE QUESTION MODE
-    # ════════════════════════════════════════════════════════════════════════
-    if mode == "Single Question":
-
-        col_inp, col_ex = st.columns([3, 1])
-
-        with col_ex:
-            st.markdown('<div class="section-label">Quick examples</div>', unsafe_allow_html=True)
-            ex_choice = st.radio("Select example", list(QA_EXAMPLES.keys()), label_visibility="collapsed")
-            if st.button("Load example", key="qa_load"):
-                st.session_state["qa_context"]  = QA_EXAMPLES[ex_choice]["context"]
-                st.session_state["qa_question"] = QA_EXAMPLES[ex_choice]["question"]
-                st.session_state["qa_gold"]     = QA_EXAMPLES[ex_choice]["gold"]
-
-        with col_inp:
-            context  = st.text_area("Context passage",               key="qa_context",  height=130,
-                                     placeholder="Paste the context passage here…")
-            question = st.text_input("Question",                     key="qa_question",
-                                      placeholder="Ask a question answerable from the context…")
-            gold     = st.text_input("Gold answer (for evaluation)", key="qa_gold",
-                                      placeholder="The reference answer span…")
-
-        if st.button("▶  Run extractive QA", type="primary", key="qa_run"):
-            if not context or not question:
-                st.warning("Please fill in the context and question.")
-            else:
-                backend_label = "Groq API ⚡" if st.session_state.get("use_groq") else f"Local — {QA_MODELS[selected_qa_model]['label']}"
-                with st.spinner(f"Running QA — {backend_label}…"):
-                    result = run_qa(
-                        question=question,
-                        context=context,
-                        model_id=selected_qa_model,
-                    )
-
-                answer = result["answer"]
-                score  = result["score"]
-                start  = result["start"]
-                end    = result["end"]
-
-                st.markdown("##### Model answer")
-                st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
-                st.caption(
-                    f"Confidence score: **{score:.4f}** · character span [{start}, {end}] · "
-                    "verbatim substring of context via start/end logit prediction."
-                )
-
-                st.markdown("##### Context with highlighted span")
-                st.markdown(
-                    f'<div class="ctx-text">{highlight_context(context, answer)}</div>',
-                    unsafe_allow_html=True,
-                )
-
-                st.markdown("##### SQuAD-style normalization trace")
-                st.caption("lowercase → strip articles (a/an/the) → strip punctuation → collapse whitespace")
-
-                _, pred_steps = normalize_answer(answer)
-                c1, c2 = st.columns(2)
-
-                with c1:
-                    html = "<div class='norm-trace'><b style='font-size:11px;color:#888780'>PREDICTION</b>"
-                    for label, val in pred_steps:
-                        html += f"<br><span style='color:#888780'>{label}:</span> &quot;{val}&quot;"
-                    html += "</div>"
-                    st.markdown(html, unsafe_allow_html=True)
-
-                with c2:
-                    if gold:
-                        _, gold_steps = normalize_answer(gold)
-                        html = "<div class='norm-trace'><b style='font-size:11px;color:#888780'>GOLD</b>"
-                        for label, val in gold_steps:
-                            html += f"<br><span style='color:#888780'>{label}:</span> &quot;{val}&quot;"
-                        html += "</div>"
-                        st.markdown(html, unsafe_allow_html=True)
-                    else:
-                        st.info("Provide a gold answer to see its normalization trace.")
-
-                if gold:
-                    m = qa_metrics(answer, gold)
-
-                    st.markdown("##### Evaluation metrics")
-                    col1, col2, col3, col4 = st.columns(4)
-                    em_color = "green" if m["exact_match"] else "red"
-                    for col, lbl, val, sub in [
-                        (col1, "Exact Match", f'<span style="color:{em_color}">{m["exact_match"]}</span>',
-                                              "✓ exact" if m["exact_match"] else "✗ no match"),
-                        (col2, "Token-F1",    f'{m["token_f1"]:.3f}', "partial credit"),
-                        (col3, "Pred tokens", str(m["pred_tokens"]),  "after norm"),
-                        (col4, "Gold tokens", str(m["gold_tokens"]),  "after norm"),
-                    ]:
-                        with col:
-                            col.markdown(
-                                f'<div class="metric-card">'
-                                f'<div class="metric-label">{lbl}</div>'
-                                f'<div class="metric-value">{val}</div>'
-                                f'<div class="metric-sub">{sub}</div>'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
-
-                    gap = m["token_f1"] - m["exact_match"]
-                    if gap > 0.15:
-                        st.info(
-                            f"Token-F1 ({m['token_f1']:.2f}) is significantly higher than "
-                            f"EM ({m['exact_match']}) — the model found the right region "
-                            "but span boundaries differ from the gold answer."
-                        )
-                    elif m["exact_match"] == 1:
-                        st.success(f"EM = 1 and F1 = {m['token_f1']:.2f} — perfect span match.")
-                    else:
-                        st.error(
-                            f"EM = 0 and F1 = {m['token_f1']:.2f} — the predicted span "
-                            "has little or no overlap with the gold answer."
-                        )
-                else:
-                    st.info("Provide a gold answer to compute EM and Token-F1.")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # BATCH EVALUATION MODE
-    # ════════════════════════════════════════════════════════════════════════
-    else:
-        st.markdown("##### Upload a CSV to evaluate")
-        st.caption(
-            "Required columns: `qid`, `question`, `context`, `gold_answer`. "
-            "Every gold answer must be a verbatim substring of its context (SQuAD v1.1 convention)."
-        )
-
-        uploaded = st.file_uploader("Choose a CSV file", type=["csv"], key="batch_upload")
-
-        if uploaded is not None:
-            try:
-                df = pd.read_csv(uploaded)
-            except Exception as e:
-                st.error(f"Could not read CSV: {e}")
-                df = None
-
-            if df is not None:
-                st.markdown(f"**{len(df)} examples loaded** — preview:")
-                st.dataframe(df.head(5), use_container_width=True)
-
-                max_rows = st.slider(
-                    "Rows to evaluate (reduce for a quick test)",
-                    min_value=1,
-                    max_value=len(df),
-                    value=min(50, len(df)),
-                    key="batch_limit",
-                )
-
-                if st.button("▶  Run batch evaluation", type="primary", key="batch_run"):
-                    df_eval      = df.head(max_rows).reset_index(drop=True)
-                    progress_bar = st.progress(0)
-                    status_text  = st.empty()
-
-                    def update_progress(current, total):
-                        progress_bar.progress(current / total)
-                        status_text.caption(f"Evaluating example {current} / {total}…")
-
-                    with st.spinner(f"Running batch evaluation — {QA_MODELS[selected_qa_model]['label']}…"):
-                        try:
-                            results = evaluate_batch(
-                                df_eval,
-                                progress_callback=update_progress,
-                                model_id=selected_qa_model,
-                            )
-                        except ValueError as e:
-                            st.error(str(e))
-                            results = None
-
-                    progress_bar.empty()
-                    status_text.empty()
-
-                    if results:
-                        st.markdown("##### Aggregate results")
-                        c1, c2, c3 = st.columns(3)
-                        for col, lbl, val, sub in [
-                            (c1, "Aggregate EM", f'{results["em"]:.3f}', f'{int(results["em"]*100)}% exact matches'),
-                            (c2, "Aggregate F1", f'{results["f1"]:.3f}', "mean token-F1"),
-                            (c3, "Examples",     str(results["n"]),      "evaluated"),
-                        ]:
-                            with col:
-                                col.markdown(
-                                    f'<div class="batch-metric-card">'
-                                    f'<div class="metric-label">{lbl}</div>'
-                                    f'<div class="metric-value">{val}</div>'
-                                    f'<div class="metric-sub">{sub}</div>'
-                                    f'</div>',
-                                    unsafe_allow_html=True,
-                                )
-
-                        gap = results["f1"] - results["em"]
-                        if gap > 0.15:
-                            st.info(
-                                f"F1 ({results['f1']:.2f}) is significantly higher than "
-                                f"EM ({results['em']:.2f}) — the model finds the right region "
-                                "but often misses exact span boundaries."
-                            )
-                        elif results["em"] > 0.7:
-                            st.success("Strong performance — EM above 0.70 on this dataset.")
-                        else:
-                            st.warning(
-                                "EM is below 0.70. Consider whether the task distribution "
-                                "matches SQuAD v1.1 training data, or whether fine-tuning would help."
-                            )
-
-                        st.markdown("##### Per-example predictions")
-                        pred_df = pd.DataFrame(results["predictions"])
-                        st.dataframe(pred_df, use_container_width=True)
-
-                        st.download_button(
-                            label="⬇  Download predictions CSV",
-                            data=pred_df.to_csv(index=False).encode("utf-8"),
-                            file_name="qa_predictions.csv",
-                            mime="text/csv",
-                            key="batch_download",
-                        )
-
-                        st.caption(
-                            f"Methodology: SQuAD-style normalization applied before EM and Token-F1. "
-                            f"Model: `{selected_qa_model}`."
-                        )
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 2 — SUMMARIZATION
-# ════════════════════════════════════════════════════════════════════════════
-with tab_summ:
-    st.markdown("#### Abstractive Summarization")
-    st.caption(
-        "Encoder–decoder transformer. "
-        "Generation: `num_beams=4`, `do_sample=False`, `no_repeat_ngram_size=3`."
-    )
-
-    # ── Model selector — hidden when Groq is active ──────────────────────────
-    if st.session_state.get("use_groq"):
-        selected_summ_model = list(SUMM_MODELS.keys())[0]
-        st.markdown(
-            '<div class="model-badge">⚡ Groq — LLaMA 3.1 8B &nbsp;|&nbsp; fallback: Gemini 2.0 Flash</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        selected_summ_model = st.selectbox(
-            "Select summarization model",
-            options=list(SUMM_MODELS.keys()),
-            format_func=lambda x: SUMM_MODELS[x]["label"],
-            index=0,
-            key="summ_model_select",
-        )
-        st.caption(SUMM_MODELS[selected_summ_model]["description"])
-
-    st.markdown("---")
-
-    summ_mode = st.radio(
-        "Summarization Mode",
-        ["Single Article", "Corpus Evaluation"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    st.markdown("---")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # SINGLE ARTICLE MODE
-    # ════════════════════════════════════════════════════════════════════════
-    if summ_mode == "Single Article":
-
-        col_inp2, col_ex2 = st.columns([3, 1])
-
-        with col_ex2:
-            st.markdown('<div class="section-label">Quick examples</div>', unsafe_allow_html=True)
-            ex_choice2 = st.radio("Select example", list(SUMM_EXAMPLES.keys()), label_visibility="collapsed")
-            if st.button("Load example", key="summ_load"):
-                st.session_state["summ_article"]   = SUMM_EXAMPLES[ex_choice2]["article"]
-                st.session_state["summ_reference"] = SUMM_EXAMPLES[ex_choice2]["reference"]
-
-        with col_inp2:
-            article   = st.text_area("Article text",                  key="summ_article",   height=130,
-                                      placeholder="Paste the article to summarize…")
-            reference = st.text_area("Reference summary (for ROUGE)", key="summ_reference", height=60,
-                                      placeholder="A human-written reference summary…")
-
-        if st.button("▶  Summarize & evaluate", type="primary", key="summ_run"):
-            if not article:
-                st.warning("Please paste an article.")
-            else:
-                backend_label = "Groq API ⚡" if st.session_state.get("use_groq") else f"Local — {SUMM_MODELS[selected_summ_model]['label']}"
-                with st.spinner(f"Running summarization — {backend_label}…"):
-                    summary = run_summarization(article, model_id=selected_summ_model)
-
-                st.markdown("##### Generated summary")
-                st.markdown(
-                    f'<div style="background:#f1efe8;border-radius:8px;padding:10px 14px;'
-                    f'font-size:14px;line-height:1.75">{summary}</div>',
-                    unsafe_allow_html=True,
-                )
-                st.caption(
-                    "Abstractive — the model may produce words not present in the article. "
-                    "Generation: `do_sample=False`, `num_beams=4`, `no_repeat_ngram_size=3`."
-                )
-
-                if reference:
-                    st.markdown("##### ROUGE scores (vs. reference)")
-                    scores = rouge_scores(predicted=summary, reference=reference)
-
-                    for label, key in [("ROUGE-1", "rouge1"), ("ROUGE-2", "rouge2"), ("ROUGE-L", "rougeL")]:
-                        pct = int(scores[key]["fmeasure"] * 100)
-                        st.markdown(
-                            f'<div class="rouge-row">'
-                            f'<span class="rouge-label">{label}</span>'
-                            f'<div class="rouge-track"><div class="rouge-fill" style="width:{pct}%"></div></div>'
-                            f'<span class="rouge-val">{pct}%</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                    col1, col2, col3, col4 = st.columns(4)
-                    for col, lbl, key, sub in [
-                        (col1, "ROUGE-1 F1", "rouge1", "unigram"),
-                        (col2, "ROUGE-2 F1", "rouge2", "bigram"),
-                        (col3, "ROUGE-L F1", "rougeL", "LCS"),
-                    ]:
-                        with col:
-                            col.markdown(
-                                f'<div class="metric-card">'
-                                f'<div class="metric-label">{lbl}</div>'
-                                f'<div class="metric-value">{scores[key]["fmeasure"]:.3f}</div>'
-                                f'<div class="metric-sub">{sub}</div>'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
-                    with col4:
-                        col4.markdown(
-                            f'<div class="metric-card">'
-                            f'<div class="metric-label">Summary tokens</div>'
-                            f'<div class="metric-value">{len(summary.split())}</div>'
-                            f'<div class="metric-sub">approx</div>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                    st.caption(
-                        "ROUGE-1: unigram F1 · ROUGE-2: bigram F1 · ROUGE-L: LCS F1 · "
-                        "`use_stemmer=True` · `scorer.score(reference, predicted)` — reference first."
-                    )
-                else:
-                    st.info("Provide a reference summary to compute ROUGE scores.")
-
-                st.markdown("##### Faithfulness check")
-                st.caption(
-                    "Numeric values extracted from the article are checked against the summary. "
-                    "ROUGE cannot detect factual errors — this check catches what ROUGE misses."
-                )
-
-                nums = extract_numbers(article)
-                if nums:
-                    found_count = 0
-                    html = ""
-                    for n in nums:
-                        found = n in summary
-                        if found:
-                            found_count += 1
-                        cls = "faith-found" if found else "faith-missing"
-                        msg = "present in summary" if found else "not found in summary"
-                        html += (
-                            f'<span class="{cls}">{"✓" if found else "✗"} {n}</span> '
-                            f'<span style="font-size:12px;color:#5f5e5a">{msg}</span><br>'
-                        )
-                    st.markdown(html, unsafe_allow_html=True)
-
-                    ratio = found_count / len(nums)
-                    if ratio == 1:
-                        st.success(f"All {len(nums)} numeric values from the article appear in the summary.")
-                    elif ratio >= 0.5:
-                        st.warning(f"{found_count} of {len(nums)} numbers preserved. Review omitted values.")
-                    else:
-                        st.error(f"Only {found_count} of {len(nums)} numbers present. Summary may omit key quantitative claims.")
-                else:
-                    st.caption("No numeric values found in the article to check.")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # CORPUS EVALUATION MODE
-    # ════════════════════════════════════════════════════════════════════════
-    else:
-        st.markdown("##### Upload your CSV files")
-        st.caption(
-            "Articles CSV: `article_id`, `text`. "
-            "References CSV: `article_id`, `reference_summary`."
-        )
-
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            st.markdown('<div class="section-label">Articles CSV</div>', unsafe_allow_html=True)
-            uploaded_articles = st.file_uploader(
-                "Articles", type=["csv"], key="summ_articles_upload",
-                label_visibility="collapsed",
-            )
-
-        with col_b:
-            st.markdown('<div class="section-label">Reference Summaries CSV</div>', unsafe_allow_html=True)
-            uploaded_refs = st.file_uploader(
-                "References", type=["csv"], key="summ_refs_upload",
-                label_visibility="collapsed",
-            )
-
-        if uploaded_articles is not None and uploaded_refs is not None:
-            try:
-                articles_df = pd.read_csv(uploaded_articles)
-                refs_df     = pd.read_csv(uploaded_refs)
-                summ_df     = articles_df.merge(refs_df, on="article_id")
-            except Exception as e:
-                st.error(f"Could not read CSV: {e}")
-                summ_df = None
-
-            if summ_df is not None:
-                st.markdown(f"**{len(summ_df)} articles loaded** — preview:")
-                st.dataframe(summ_df.head(5), use_container_width=True)
-
-                max_rows_summ = st.slider(
-                    "Articles to evaluate (reduce for a quick test)",
-                    min_value=1,
-                    max_value=len(summ_df),
-                    value=min(10, len(summ_df)),
-                    key="summ_batch_limit",
-                )
-
-                if st.button("▶  Run corpus evaluation", type="primary", key="summ_batch_run"):
-                    df_eval_summ  = summ_df.head(max_rows_summ).reset_index(drop=True)
-                    progress_bar2 = st.progress(0)
-                    status_text2  = st.empty()
-
-                    def update_summ_progress(current, total):
-                        progress_bar2.progress(current / total)
-                        status_text2.caption(f"Summarizing article {current} / {total}…")
-
-                    with st.spinner(f"Running corpus summarization — {SUMM_MODELS[selected_summ_model]['label']}…"):
-                        try:
-                            summ_results = evaluate_summaries(
-                                df_eval_summ,
-                                progress_callback=update_summ_progress,
-                                model_id=selected_summ_model,
-                            )
-                        except ValueError as e:
-                            st.error(str(e))
-                            summ_results = None
-
-                    progress_bar2.empty()
-                    status_text2.empty()
-
-                    if summ_results:
-                        st.markdown("##### Aggregate ROUGE scores")
-                        c1, c2, c3, c4 = st.columns(4)
-                        for col, lbl, val, sub in [
-                            (c1, "ROUGE-1", f'{summ_results["rouge1"]:.3f}', "unigram F1"),
-                            (c2, "ROUGE-2", f'{summ_results["rouge2"]:.3f}', "bigram F1"),
-                            (c3, "ROUGE-L", f'{summ_results["rougeL"]:.3f}', "LCS F1"),
-                            (c4, "Articles", str(summ_results["n"]),         "evaluated"),
-                        ]:
-                            with col:
-                                col.markdown(
-                                    f'<div class="summ-metric-card">'
-                                    f'<div class="metric-label">{lbl}</div>'
-                                    f'<div class="metric-value">{val}</div>'
-                                    f'<div class="metric-sub">{sub}</div>'
-                                    f'</div>',
-                                    unsafe_allow_html=True,
-                                )
-
-                        if summ_results["rouge1"] >= 0.4:
-                            st.success("ROUGE-1 ≥ 0.40 — strong lexical overlap with references.")
-                        elif summ_results["rouge1"] >= 0.25:
-                            st.warning("ROUGE-1 between 0.25–0.40 — moderate overlap. Consider fine-tuning for domain-specific content.")
-                        else:
-                            st.error("ROUGE-1 < 0.25 — low overlap. The model may not suit this domain without fine-tuning.")
-
-                        st.markdown("##### Per-article predictions")
-                        pred_summ_df = pd.DataFrame(summ_results["predictions"])
-                        st.dataframe(pred_summ_df, use_container_width=True)
-
-                        st.download_button(
-                            label="⬇  Download predictions CSV",
-                            data=pred_summ_df.to_csv(index=False).encode("utf-8"),
-                            file_name="summary_predictions.csv",
-                            mime="text/csv",
-                            key="summ_batch_download",
-                        )
-
-                        st.caption(
-                            f"Methodology: ROUGE F1 · `use_stemmer=True` · "
-                            f"`scorer.score(reference, predicted)` — reference first. "
-                            f"Model: `{selected_summ_model}`."
-                        )
-
-        elif uploaded_articles is not None and uploaded_refs is None:
-            st.info("Please upload the reference summaries CSV.")
-        elif uploaded_refs is not None and uploaded_articles is None:
-            st.info("Please upload the articles CSV.")
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# TAB 3 — DECISION MATRIX
-# ════════════════════════════════════════════════════════════════════════════
-with tab_decision:
-    st.markdown("#### Five-factor decision matrix")
-    st.caption(
-        "Adjust the five factors from Section 8 of the reading. "
-        "The recommendation updates in real time."
-    )
-
-    vals = []
-    for i, factor in enumerate(DECISION_FACTORS):
-        st.markdown(f"**{factor['name']}**")
-        st.caption(f"{factor['desc']} · {factor['lo']} → {factor['hi']}")
-        v = st.slider(factor['name'], 1, 5, 3, key=f"slider_{i}", label_visibility="collapsed")
-        vals.append(v)
-
-    weights = [f["weight"] for f in DECISION_FACTORS]
-    score   = decision_score(vals, weights)
-
-    st.markdown("---")
-    st.markdown(f"**Fine-tune signal score: {score} / 100**")
-    st.progress(score / 100)
-
-    rationale = decision_rationale(vals)
-
-    if score < 35:
-        st.markdown(
-            f'<div class="rec-pretrained">'
-            f'<b style="color:#0f6e56">✓ Use pre-trained inference</b><br>'
-            f'<span style="font-size:13px;color:#444">{rationale}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-    elif score < 60:
-        st.markdown(
-            f'<div class="rec-borderline">'
-            f'<b style="color:#854f0b">⚖ Evaluate the pre-trained baseline first</b><br>'
-            f'<span style="font-size:13px;color:#444">{rationale}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f'<div class="rec-finetune">'
-            f'<b style="color:#534ab7">🧠 Fine-tuning is justified</b><br>'
-            f'<span style="font-size:13px;color:#444">{rationale}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-    st.markdown("**How the score is computed**")
-    st.caption(
-        "Each factor is weighted and normalized to 0–100. "
-        "Weights: labeled data 25%, task specificity 20%, compute budget 20%, "
-        "quality gap 20%, iteration speed 15%. "
-        "Thresholds: < 35 → pre-trained · 35–60 → evaluate first · > 60 → fine-tune."
-    )
+    return out[0]["summary_text"]
