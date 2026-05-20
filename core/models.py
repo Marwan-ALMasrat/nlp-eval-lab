@@ -62,6 +62,9 @@ _HF_API_URL   = "https://router.huggingface.co/hf-inference/models"
 _GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL   = "llama-3.1-8b-instant"
 
+# حد الطلبات: انتظر هذه المدة بين كل طلب وآخر (بالثواني)
+_GROQ_MIN_INTERVAL = 2.0
+
 
 # ─── Credentials ─────────────────────────────────────────────────────────────
 
@@ -88,18 +91,48 @@ def _is_hf_api() -> bool:
 
 
 def _user_wants_groq() -> bool:
-    """Returns True if user selected Groq in the sidebar AND key exists."""
     return st.session_state.get("use_groq", True) and _is_groq()
 
 
+# ─── Rate limit helper ───────────────────────────────────────────────────────
+
+def _groq_post(payload: dict, timeout: int = 15) -> dict:
+    """
+    POST to Groq with automatic retry on 429.
+    يحترم Retry-After header إذا وُجد، وإلا ينتظر تصاعدياً.
+    """
+    wait = _GROQ_MIN_INTERVAL
+    for attempt in range(4):
+        response = requests.post(
+            _GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {_groq_key()}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+
+        if response.status_code == 429:
+            # اقرأ Retry-After من الـ header إذا وُجد
+            retry_after = response.headers.get("Retry-After") or response.headers.get("x-ratelimit-reset-requests")
+            if retry_after:
+                try:
+                    wait = float(retry_after)
+                except ValueError:
+                    pass
+            st.info(f"⏳ Groq rate limit — انتظر {wait:.0f}s ثم أعيد المحاولة… (محاولة {attempt+1}/4)")
+            time.sleep(wait)
+            wait = min(wait * 2, 60)  # تضاعف الانتظار حتى 60 ثانية
+            continue
+
+        response.raise_for_status()
+        return response.json()
+
+    raise RuntimeError("Groq API: تجاوزت حد الطلبات بعد 4 محاولات. حاول لاحقاً.")
+
+
 # ─── Groq API ────────────────────────────────────────────────────────────────
-
-def _groq_headers() -> dict:
-    return {
-        "Authorization": f"Bearer {_groq_key()}",
-        "Content-Type": "application/json",
-    }
-
 
 def _groq_qa(question: str, context: str) -> dict:
     prompt = f"""You are a precise question-answering assistant.
@@ -114,24 +147,18 @@ Question: {question}
 
 Respond with JSON only, no explanation."""
 
-    response = requests.post(
-        _GROQ_API_URL,
-        headers=_groq_headers(),
-        json={
-            "model": _GROQ_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "max_tokens": 200,
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"].strip()
+    data    = _groq_post({
+        "model": _GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 200,
+    })
+    content = data["choices"][0]["message"]["content"].strip()
     content = re.sub(r"```json|```", "", content).strip()
-    data    = json.loads(content)
+    result  = json.loads(content)
 
-    answer = data.get("answer", "")
-    score  = float(data.get("score", 0.9))
+    answer = result.get("answer", "")
+    score  = float(result.get("score", 0.9))
     start  = context.find(answer)
     if start == -1:
         start = 0
@@ -149,19 +176,13 @@ Article:
 
 Summary:"""
 
-    response = requests.post(
-        _GROQ_API_URL,
-        headers=_groq_headers(),
-        json={
-            "model": _GROQ_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 150,
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"].strip()
+    data = _groq_post({
+        "model": _GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 150,
+    })
+    return data["choices"][0]["message"]["content"].strip()
 
 
 # ─── HuggingFace API ─────────────────────────────────────────────────────────
@@ -240,46 +261,38 @@ def _get_summ_pipeline_local(model_id: str):
 # ─── Public run functions ────────────────────────────────────────────────────
 
 def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dict:
-    """
-    Run extractive QA.
-    Priority (based on sidebar selection):
-      Groq selected  → Groq → fallback HF → fallback Local
-      Local selected → Local directly
-    """
     if _user_wants_groq():
         try:
             return _groq_qa(question, context)
+        except RuntimeError as e:
+            st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq API failed ({e}) — trying HuggingFace.")
+            st.warning(f"Groq فشل ({e}) — جاري المحاولة محلياً.")
 
     if _is_hf_api():
         try:
             return _hf_qa(question, context, model_id)
         except Exception as e:
-            st.warning(f"HuggingFace API failed ({e}) — falling back to local.")
+            st.warning(f"HuggingFace فشل ({e}) — جاري التشغيل محلياً.")
 
     pipeline = _get_qa_pipeline_local(model_id)
     return pipeline(question=question, context=context)
 
 
 def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
-    """
-    Run abstractive summarization.
-    Priority (based on sidebar selection):
-      Groq selected  → Groq → fallback HF → fallback Local
-      Local selected → Local directly
-    """
     if _user_wants_groq():
         try:
             return _groq_summarize(text)
+        except RuntimeError as e:
+            st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq API failed ({e}) — trying HuggingFace.")
+            st.warning(f"Groq فشل ({e}) — جاري المحاولة محلياً.")
 
     if _is_hf_api():
         try:
             return _hf_summarize(text, model_id)
         except Exception as e:
-            st.warning(f"HuggingFace API failed ({e}) — falling back to local.")
+            st.warning(f"HuggingFace فشل ({e}) — جاري التشغيل محلياً.")
 
     pipeline = _get_summ_pipeline_local(model_id)
     out = pipeline(
