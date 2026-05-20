@@ -15,7 +15,7 @@ Run:
 import pandas as pd
 import streamlit as st
 
-from core.evaluator import evaluate_batch
+from core.evaluator import evaluate_batch, evaluate_summaries
 from core.metrics   import decision_rationale, decision_score, qa_metrics, rouge_scores
 from core.models    import run_qa, run_summarization
 from core.utils     import extract_numbers, highlight_context, normalize_answer
@@ -52,6 +52,11 @@ st.markdown("""
 
 .batch-metric-card {
     background:#eeedfe; border-radius:8px;
+    padding:14px 16px; text-align:center; flex:1;
+}
+
+.summ-metric-card {
+    background:#e1f5ee; border-radius:8px;
     padding:14px 16px; text-align:center; flex:1;
 }
 
@@ -111,7 +116,6 @@ with tab_qa:
         "Fine-tuned on SQuAD v1.1 — every question has an answer in the context."
     )
 
-    # ── Mode toggle ──────────────────────────────────────────────────────────
     mode = st.radio(
         "Mode",
         ["Single Question", "Batch Evaluation"],
@@ -286,9 +290,9 @@ with tab_qa:
                         st.markdown("##### Aggregate results")
                         c1, c2, c3 = st.columns(3)
                         for col, lbl, val, sub in [
-                            (c1, "Aggregate EM",  f'{results["em"]:.3f}', f'{int(results["em"]*100)}% exact matches'),
-                            (c2, "Aggregate F1",  f'{results["f1"]:.3f}', "mean token-F1"),
-                            (c3, "Examples",      str(results["n"]),      "evaluated"),
+                            (c1, "Aggregate EM", f'{results["em"]:.3f}', f'{int(results["em"]*100)}% exact matches'),
+                            (c2, "Aggregate F1", f'{results["f1"]:.3f}', "mean token-F1"),
+                            (c3, "Examples",     str(results["n"]),      "evaluated"),
                         ]:
                             with col:
                                 col.markdown(
@@ -343,117 +347,227 @@ with tab_summ:
         "Generation: `num_beams=4`, `do_sample=False`, `no_repeat_ngram_size=3`."
     )
 
-    col_inp2, col_ex2 = st.columns([3, 1])
+    summ_mode = st.radio(
+        "Summarization Mode",
+        ["Single Article", "Corpus Evaluation"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.markdown("---")
 
-    with col_ex2:
-        st.markdown('<div class="section-label">Quick examples</div>', unsafe_allow_html=True)
-        ex_choice2 = st.radio("", list(SUMM_EXAMPLES.keys()), label_visibility="collapsed")
-        if st.button("Load example", key="summ_load"):
-            st.session_state["summ_article"]   = SUMM_EXAMPLES[ex_choice2]["article"]
-            st.session_state["summ_reference"] = SUMM_EXAMPLES[ex_choice2]["reference"]
+    # ════════════════════════════════════════════════════════════════════════
+    # SINGLE ARTICLE MODE
+    # ════════════════════════════════════════════════════════════════════════
+    if summ_mode == "Single Article":
 
-    with col_inp2:
-        article   = st.text_area("Article text",                  key="summ_article",   height=130,
-                                  placeholder="Paste the article to summarize…")
-        reference = st.text_area("Reference summary (for ROUGE)", key="summ_reference", height=60,
-                                  placeholder="A human-written reference summary…")
+        col_inp2, col_ex2 = st.columns([3, 1])
 
-    if st.button("▶  Summarize & evaluate", type="primary", key="summ_run"):
-        if not article:
-            st.warning("Please paste an article.")
-        else:
-            with st.spinner("Running summarization pipeline…"):
-                summary = run_summarization(article)
+        with col_ex2:
+            st.markdown('<div class="section-label">Quick examples</div>', unsafe_allow_html=True)
+            ex_choice2 = st.radio("", list(SUMM_EXAMPLES.keys()), label_visibility="collapsed")
+            if st.button("Load example", key="summ_load"):
+                st.session_state["summ_article"]   = SUMM_EXAMPLES[ex_choice2]["article"]
+                st.session_state["summ_reference"] = SUMM_EXAMPLES[ex_choice2]["reference"]
 
-            st.markdown("##### Generated summary")
-            st.markdown(
-                f'<div style="background:#f1efe8;border-radius:8px;padding:10px 14px;'
-                f'font-size:14px;line-height:1.75">{summary}</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Abstractive — the model may produce words not present in the article. "
-                "Generation: `do_sample=False`, `num_beams=4`, `no_repeat_ngram_size=3`."
-            )
+        with col_inp2:
+            article   = st.text_area("Article text",                  key="summ_article",   height=130,
+                                      placeholder="Paste the article to summarize…")
+            reference = st.text_area("Reference summary (for ROUGE)", key="summ_reference", height=60,
+                                      placeholder="A human-written reference summary…")
 
-            if reference:
-                st.markdown("##### ROUGE scores (vs. reference)")
-                scores = rouge_scores(predicted=summary, reference=reference)
+        if st.button("▶  Summarize & evaluate", type="primary", key="summ_run"):
+            if not article:
+                st.warning("Please paste an article.")
+            else:
+                with st.spinner("Running summarization pipeline…"):
+                    summary = run_summarization(article)
 
-                for label, key in [("ROUGE-1", "rouge1"), ("ROUGE-2", "rouge2"), ("ROUGE-L", "rougeL")]:
-                    pct = int(scores[key]["fmeasure"] * 100)
-                    st.markdown(
-                        f'<div class="rouge-row">'
-                        f'<span class="rouge-label">{label}</span>'
-                        f'<div class="rouge-track"><div class="rouge-fill" style="width:{pct}%"></div></div>'
-                        f'<span class="rouge-val">{pct}%</span>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
+                st.markdown("##### Generated summary")
+                st.markdown(
+                    f'<div style="background:#f1efe8;border-radius:8px;padding:10px 14px;'
+                    f'font-size:14px;line-height:1.75">{summary}</div>',
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    "Abstractive — the model may produce words not present in the article. "
+                    "Generation: `do_sample=False`, `num_beams=4`, `no_repeat_ngram_size=3`."
+                )
 
-                col1, col2, col3, col4 = st.columns(4)
-                for col, lbl, key, sub in [
-                    (col1, "ROUGE-1 F1", "rouge1", "unigram"),
-                    (col2, "ROUGE-2 F1", "rouge2", "bigram"),
-                    (col3, "ROUGE-L F1", "rougeL", "LCS"),
-                ]:
-                    with col:
-                        col.markdown(
-                            f'<div class="metric-card">'
-                            f'<div class="metric-label">{lbl}</div>'
-                            f'<div class="metric-value">{scores[key]["fmeasure"]:.3f}</div>'
-                            f'<div class="metric-sub">{sub}</div>'
+                if reference:
+                    st.markdown("##### ROUGE scores (vs. reference)")
+                    scores = rouge_scores(predicted=summary, reference=reference)
+
+                    for label, key in [("ROUGE-1", "rouge1"), ("ROUGE-2", "rouge2"), ("ROUGE-L", "rougeL")]:
+                        pct = int(scores[key]["fmeasure"] * 100)
+                        st.markdown(
+                            f'<div class="rouge-row">'
+                            f'<span class="rouge-label">{label}</span>'
+                            f'<div class="rouge-track"><div class="rouge-fill" style="width:{pct}%"></div></div>'
+                            f'<span class="rouge-val">{pct}%</span>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
-                with col4:
-                    col4.markdown(
-                        f'<div class="metric-card">'
-                        f'<div class="metric-label">Summary tokens</div>'
-                        f'<div class="metric-value">{len(summary.split())}</div>'
-                        f'<div class="metric-sub">approx</div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    for col, lbl, key, sub in [
+                        (col1, "ROUGE-1 F1", "rouge1", "unigram"),
+                        (col2, "ROUGE-2 F1", "rouge2", "bigram"),
+                        (col3, "ROUGE-L F1", "rougeL", "LCS"),
+                    ]:
+                        with col:
+                            col.markdown(
+                                f'<div class="metric-card">'
+                                f'<div class="metric-label">{lbl}</div>'
+                                f'<div class="metric-value">{scores[key]["fmeasure"]:.3f}</div>'
+                                f'<div class="metric-sub">{sub}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+                    with col4:
+                        col4.markdown(
+                            f'<div class="metric-card">'
+                            f'<div class="metric-label">Summary tokens</div>'
+                            f'<div class="metric-value">{len(summary.split())}</div>'
+                            f'<div class="metric-sub">approx</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                    st.caption(
+                        "ROUGE-1: unigram F1 · ROUGE-2: bigram F1 · ROUGE-L: LCS F1 · "
+                        "`use_stemmer=True` · `scorer.score(reference, predicted)` — reference first."
                     )
-
-                st.caption(
-                    "ROUGE-1: unigram F1 · ROUGE-2: bigram F1 · ROUGE-L: LCS F1 · "
-                    "`use_stemmer=True` · `scorer.score(reference, predicted)` — reference first."
-                )
-            else:
-                st.info("Provide a reference summary to compute ROUGE scores.")
-
-            st.markdown("##### Faithfulness check")
-            st.caption(
-                "Numeric values extracted from the article are checked against the summary. "
-                "ROUGE cannot detect factual errors — this check catches what ROUGE misses."
-            )
-
-            nums = extract_numbers(article)
-            if nums:
-                found_count = 0
-                html = ""
-                for n in nums:
-                    found = n in summary
-                    if found:
-                        found_count += 1
-                    cls = "faith-found" if found else "faith-missing"
-                    msg = "present in summary" if found else "not found in summary"
-                    html += (
-                        f'<span class="{cls}">{"✓" if found else "✗"} {n}</span> '
-                        f'<span style="font-size:12px;color:#5f5e5a">{msg}</span><br>'
-                    )
-                st.markdown(html, unsafe_allow_html=True)
-
-                ratio = found_count / len(nums)
-                if ratio == 1:
-                    st.success(f"All {len(nums)} numeric values from the article appear in the summary.")
-                elif ratio >= 0.5:
-                    st.warning(f"{found_count} of {len(nums)} numbers preserved. Review omitted values.")
                 else:
-                    st.error(f"Only {found_count} of {len(nums)} numbers present. Summary may omit key quantitative claims.")
-            else:
-                st.caption("No numeric values found in the article to check.")
+                    st.info("Provide a reference summary to compute ROUGE scores.")
+
+                st.markdown("##### Faithfulness check")
+                st.caption(
+                    "Numeric values extracted from the article are checked against the summary. "
+                    "ROUGE cannot detect factual errors — this check catches what ROUGE misses."
+                )
+
+                nums = extract_numbers(article)
+                if nums:
+                    found_count = 0
+                    html = ""
+                    for n in nums:
+                        found = n in summary
+                        if found:
+                            found_count += 1
+                        cls = "faith-found" if found else "faith-missing"
+                        msg = "present in summary" if found else "not found in summary"
+                        html += (
+                            f'<span class="{cls}">{"✓" if found else "✗"} {n}</span> '
+                            f'<span style="font-size:12px;color:#5f5e5a">{msg}</span><br>'
+                        )
+                    st.markdown(html, unsafe_allow_html=True)
+
+                    ratio = found_count / len(nums)
+                    if ratio == 1:
+                        st.success(f"All {len(nums)} numeric values from the article appear in the summary.")
+                    elif ratio >= 0.5:
+                        st.warning(f"{found_count} of {len(nums)} numbers preserved. Review omitted values.")
+                    else:
+                        st.error(f"Only {found_count} of {len(nums)} numbers present. Summary may omit key quantitative claims.")
+                else:
+                    st.caption("No numeric values found in the article to check.")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # CORPUS EVALUATION MODE
+    # ════════════════════════════════════════════════════════════════════════
+    else:
+        st.markdown("##### Upload a CSV to evaluate")
+        st.caption(
+            "Required columns: `article_id`, `text`, `reference_summary`. "
+            "The pipeline will summarize each article and compute ROUGE against the reference."
+        )
+
+        uploaded_summ = st.file_uploader("Choose a CSV file", type=["csv"], key="summ_batch_upload")
+
+        if uploaded_summ is not None:
+            try:
+                summ_df = pd.read_csv(uploaded_summ)
+            except Exception as e:
+                st.error(f"Could not read CSV: {e}")
+                summ_df = None
+
+            if summ_df is not None:
+                st.markdown(f"**{len(summ_df)} articles loaded** — preview:")
+                st.dataframe(summ_df.head(5), use_container_width=True)
+
+                max_rows_summ = st.slider(
+                    "Articles to evaluate (reduce for a quick test)",
+                    min_value=1,
+                    max_value=len(summ_df),
+                    value=min(10, len(summ_df)),
+                    key="summ_batch_limit",
+                )
+
+                if st.button("▶  Run corpus evaluation", type="primary", key="summ_batch_run"):
+                    df_eval_summ  = summ_df.head(max_rows_summ).reset_index(drop=True)
+                    progress_bar2 = st.progress(0)
+                    status_text2  = st.empty()
+
+                    def update_summ_progress(current, total):
+                        progress_bar2.progress(current / total)
+                        status_text2.caption(f"Summarizing article {current} / {total}…")
+
+                    with st.spinner("Running corpus summarization…"):
+                        try:
+                            summ_results = evaluate_summaries(
+                                df_eval_summ,
+                                progress_callback=update_summ_progress,
+                            )
+                        except ValueError as e:
+                            st.error(str(e))
+                            summ_results = None
+
+                    progress_bar2.empty()
+                    status_text2.empty()
+
+                    if summ_results:
+                        st.markdown("##### Aggregate ROUGE scores")
+                        c1, c2, c3, c4 = st.columns(4)
+                        for col, lbl, val, sub in [
+                            (c1, "ROUGE-1", f'{summ_results["rouge1"]:.3f}', "unigram F1"),
+                            (c2, "ROUGE-2", f'{summ_results["rouge2"]:.3f}', "bigram F1"),
+                            (c3, "ROUGE-L", f'{summ_results["rougeL"]:.3f}', "LCS F1"),
+                            (c4, "Articles", str(summ_results["n"]),         "evaluated"),
+                        ]:
+                            with col:
+                                col.markdown(
+                                    f'<div class="summ-metric-card">'
+                                    f'<div class="metric-label">{lbl}</div>'
+                                    f'<div class="metric-value">{val}</div>'
+                                    f'<div class="metric-sub">{sub}</div>'
+                                    f'</div>',
+                                    unsafe_allow_html=True,
+                                )
+
+                        if summ_results["rouge1"] >= 0.4:
+                            st.success("ROUGE-1 ≥ 0.40 — strong lexical overlap with references.")
+                        elif summ_results["rouge1"] >= 0.25:
+                            st.warning("ROUGE-1 between 0.25–0.40 — moderate overlap. Consider fine-tuning for domain-specific content.")
+                        else:
+                            st.error("ROUGE-1 < 0.25 — low overlap. The model may not suit this domain without fine-tuning.")
+
+                        st.markdown("##### Per-article predictions")
+                        pred_summ_df = pd.DataFrame(summ_results["predictions"])
+                        st.dataframe(pred_summ_df, use_container_width=True)
+
+                        st.download_button(
+                            label="⬇  Download predictions CSV",
+                            data=pred_summ_df.to_csv(index=False).encode("utf-8"),
+                            file_name="summary_predictions.csv",
+                            mime="text/csv",
+                            key="summ_batch_download",
+                        )
+
+                        st.caption(
+                            "Methodology: ROUGE F1 · `use_stemmer=True` · "
+                            "`scorer.score(reference, predicted)` — reference first. "
+                            "Model: `sshleifer/distilbart-cnn-6-6`."
+                        )
 
 
 # ════════════════════════════════════════════════════════════════════════════

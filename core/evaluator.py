@@ -1,16 +1,14 @@
 """
 core/evaluator.py
 ─────────────────
-Batch QA evaluation over a DataFrame of examples.
+Batch evaluation for both QA and Summarization.
 No Streamlit imports. Pure logic only.
-
-Expected DataFrame columns: qid, question, context, gold_answer
 """
 
 import pandas as pd
 
-from core.metrics import qa_metrics
-from core.models  import run_qa
+from core.metrics import qa_metrics, rouge_scores
+from core.models  import run_qa, run_summarization
 
 
 def evaluate_batch(df: pd.DataFrame, progress_callback=None) -> dict:
@@ -23,21 +21,10 @@ def evaluate_batch(df: pd.DataFrame, progress_callback=None) -> dict:
 
     Returns:
         {
-            "em":          float,   # mean exact match across all examples
-            "f1":          float,   # mean token-F1 across all examples
-            "n":           int,     # number of examples evaluated
-            "predictions": list[dict],  # one dict per example
-        }
-
-    Each prediction dict:
-        {
-            "qid":               str,
-            "question":          str,
-            "context_excerpt":   str,   # first 80 chars of context
-            "gold_answer":       str,
-            "predicted_answer":  str,
-            "em":                int,   # 0 or 1
-            "f1":                float,
+            "em":          float,
+            "f1":          float,
+            "n":           int,
+            "predictions": list[dict],
         }
     """
     required = {"qid", "question", "context", "gold_answer"}
@@ -80,6 +67,79 @@ def evaluate_batch(df: pd.DataFrame, progress_callback=None) -> dict:
     return {
         "em":          sum(em_scores) / n if n else 0.0,
         "f1":          sum(f1_scores) / n if n else 0.0,
+        "n":           n,
+        "predictions": predictions,
+    }
+
+
+def evaluate_summaries(df: pd.DataFrame, progress_callback=None) -> dict:
+    """
+    Run the summarization pipeline over every row in df and compute ROUGE.
+
+    Args:
+        df:                DataFrame with columns: article_id, text, reference_summary
+        progress_callback: optional callable(current, total) for progress updates
+
+    Returns:
+        {
+            "rouge1":      float,
+            "rouge2":      float,
+            "rougeL":      float,
+            "n":           int,
+            "predictions": list[dict],
+        }
+
+    Each prediction dict:
+        {
+            "article_id":        str,
+            "text_excerpt":      str,   # first 80 chars of article
+            "reference_summary": str,
+            "predicted_summary": str,
+            "rouge1":            float,
+            "rouge2":            float,
+            "rougeL":            float,
+        }
+    """
+    required = {"article_id", "text", "reference_summary"}
+    missing  = required - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV is missing required columns: {missing}")
+
+    predictions = []
+    r1_scores   = []
+    r2_scores   = []
+    rl_scores   = []
+    total       = len(df)
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        text      = str(row["text"])
+        reference = str(row["reference_summary"])
+
+        predicted = run_summarization(text)
+        rouge     = rouge_scores(predicted=predicted, reference=reference)
+
+        r1_scores.append(rouge["rouge1"]["fmeasure"])
+        r2_scores.append(rouge["rouge2"]["fmeasure"])
+        rl_scores.append(rouge["rougeL"]["fmeasure"])
+
+        predictions.append({
+            "article_id":        str(row["article_id"]),
+            "text_excerpt":      text[:80],
+            "reference_summary": reference,
+            "predicted_summary": predicted,
+            "rouge1":            rouge["rouge1"]["fmeasure"],
+            "rouge2":            rouge["rouge2"]["fmeasure"],
+            "rougeL":            rouge["rougeL"]["fmeasure"],
+        })
+
+        if progress_callback:
+            progress_callback(i + 1, total)
+
+    n = len(predictions)
+    return {
+        "rouge1":      sum(r1_scores) / n if n else 0.0,
+        "rouge2":      sum(r2_scores) / n if n else 0.0,
+        "rougeL":      sum(rl_scores) / n if n else 0.0,
         "n":           n,
         "predictions": predictions,
     }
