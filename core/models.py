@@ -2,15 +2,13 @@
 core/models.py
 ──────────────
 Model loading with dynamic model selection.
-Supports three inference modes:
-  - Groq API:        fastest, no local download, requires GROQ_API_KEY
-  - HuggingFace API: fast, requires HF_TOKEN
-  - Local:           loads HuggingFace pipeline directly (slow on CPU)
-
 Priority: Groq API → HuggingFace API → Local CPU
+الخيار يُقرأ من st.session_state["use_groq"] الذي يضبطه المستخدم من الـ sidebar.
 """
 
 import os
+import re
+import json
 import time
 
 import requests
@@ -23,9 +21,7 @@ from transformers import (
 )
 from transformers.pipelines import QuestionAnsweringPipeline, SummarizationPipeline
 
-# ─── Load .env for local development ─────────────────────────────────────────
 load_dotenv()
-
 
 # ─── Available models ────────────────────────────────────────────────────────
 
@@ -62,9 +58,9 @@ SUMM_MODELS = {
 DEFAULT_QA_MODEL   = "distilbert-base-cased-distilled-squad"
 DEFAULT_SUMM_MODEL = "sshleifer/distilbart-cnn-6-6"
 
-_HF_API_URL  = "https://router.huggingface.co/hf-inference/models"
+_HF_API_URL   = "https://router.huggingface.co/hf-inference/models"
 _GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL   = "llama-3.1-8b-instant"   # fast & free on Groq
+_GROQ_MODEL   = "llama-3.1-8b-instant"
 
 
 # ─── Credentials ─────────────────────────────────────────────────────────────
@@ -91,7 +87,12 @@ def _is_hf_api() -> bool:
     return bool(_hf_token())
 
 
-# ─── Groq API inference ───────────────────────────────────────────────────────
+def _user_wants_groq() -> bool:
+    """Returns True if user selected Groq in the sidebar AND key exists."""
+    return st.session_state.get("use_groq", True) and _is_groq()
+
+
+# ─── Groq API ────────────────────────────────────────────────────────────────
 
 def _groq_headers() -> dict:
     return {
@@ -101,14 +102,11 @@ def _groq_headers() -> dict:
 
 
 def _groq_qa(question: str, context: str) -> dict:
-    """Call Groq API for extractive QA using LLaMA."""
     prompt = f"""You are a precise question-answering assistant.
 Extract the answer to the question from the context below.
 Return ONLY a JSON object with these fields:
 - "answer": the exact answer string extracted from the context
 - "score": confidence float between 0 and 1
-- "start": approximate character start index in context (integer)
-- "end": approximate character end index in context (integer)
 
 Context: {context}
 
@@ -129,18 +127,12 @@ Respond with JSON only, no explanation."""
     )
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"].strip()
-
-    # Parse JSON response
-    import json, re
-    # Strip markdown fences if present
     content = re.sub(r"```json|```", "", content).strip()
-    data = json.loads(content)
+    data    = json.loads(content)
 
     answer = data.get("answer", "")
     score  = float(data.get("score", 0.9))
-
-    # Find actual character positions in context
-    start = context.find(answer)
+    start  = context.find(answer)
     if start == -1:
         start = 0
     end = start + len(answer)
@@ -149,7 +141,6 @@ Respond with JSON only, no explanation."""
 
 
 def _groq_summarize(text: str) -> str:
-    """Call Groq API for abstractive summarization using LLaMA."""
     prompt = f"""Summarize the following article in 2-3 concise sentences.
 Return only the summary, no preamble or explanation.
 
@@ -173,7 +164,7 @@ Summary:"""
     return response.json()["choices"][0]["message"]["content"].strip()
 
 
-# ─── HuggingFace API inference ───────────────────────────────────────────────
+# ─── HuggingFace API ─────────────────────────────────────────────────────────
 
 def _hf_headers() -> dict:
     return {"Authorization": f"Bearer {_hf_token()}"}
@@ -230,7 +221,7 @@ def _hf_summarize(text: str, model_id: str) -> str:
     raise RuntimeError("HuggingFace API unavailable after 3 attempts.")
 
 
-# ─── Local pipeline loaders ──────────────────────────────────────────────────
+# ─── Local pipelines ─────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner="Loading QA model…")
 def _get_qa_pipeline_local(model_id: str):
@@ -251,31 +242,22 @@ def _get_summ_pipeline_local(model_id: str):
 def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dict:
     """
     Run extractive QA.
-    Priority: Groq API → HuggingFace API → Local CPU
-
-    Returns:
-        {
-            "answer": str,
-            "score":  float,
-            "start":  int,
-            "end":    int,
-        }
+    Priority (based on sidebar selection):
+      Groq selected  → Groq → fallback HF → fallback Local
+      Local selected → Local directly
     """
-    # 1 — Groq API (fastest)
-    if _is_groq():
+    if _user_wants_groq():
         try:
             return _groq_qa(question, context)
         except Exception as e:
-            st.warning(f"Groq API failed ({e}) — trying next mode.")
+            st.warning(f"Groq API failed ({e}) — trying HuggingFace.")
 
-    # 2 — HuggingFace API
     if _is_hf_api():
         try:
             return _hf_qa(question, context, model_id)
         except Exception as e:
             st.warning(f"HuggingFace API failed ({e}) — falling back to local.")
 
-    # 3 — Local CPU
     pipeline = _get_qa_pipeline_local(model_id)
     return pipeline(question=question, context=context)
 
@@ -283,25 +265,22 @@ def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dic
 def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
     """
     Run abstractive summarization.
-    Priority: Groq API → HuggingFace API → Local CPU
-
-    Returns the summary string.
+    Priority (based on sidebar selection):
+      Groq selected  → Groq → fallback HF → fallback Local
+      Local selected → Local directly
     """
-    # 1 — Groq API (fastest)
-    if _is_groq():
+    if _user_wants_groq():
         try:
             return _groq_summarize(text)
         except Exception as e:
-            st.warning(f"Groq API failed ({e}) — trying next mode.")
+            st.warning(f"Groq API failed ({e}) — trying HuggingFace.")
 
-    # 2 — HuggingFace API
     if _is_hf_api():
         try:
             return _hf_summarize(text, model_id)
         except Exception as e:
             st.warning(f"HuggingFace API failed ({e}) — falling back to local.")
 
-    # 3 — Local CPU
     pipeline = _get_summ_pipeline_local(model_id)
     out = pipeline(
         text,

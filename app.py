@@ -20,16 +20,10 @@ from core.metrics   import decision_rationale, decision_score, qa_metrics, rouge
 from core.models    import (
     QA_MODELS, SUMM_MODELS,
     run_qa, run_summarization,
+    _is_groq,
 )
 from core.utils     import extract_numbers, highlight_context, normalize_answer
 from data.examples  import DECISION_FACTORS, QA_EXAMPLES, SUMM_EXAMPLES
-
-from core.models import _is_groq
-if _is_groq():
-    st.success("✅ يعمل على Groq API")
-else:
-    st.warning("⚠️ يعمل محلياً — تحقق من GROQ_API_KEY")
-  
 
 # ─── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -105,6 +99,38 @@ mark { background:#faeeda; color:#854f0b; border-radius:3px; padding:1px 3px; fo
 </style>
 """, unsafe_allow_html=True)
 
+
+# ─── Sidebar — Inference backend selector ───────────────────────────────────
+with st.sidebar:
+    st.markdown("### ⚙️ Inference Backend")
+
+    groq_available = _is_groq()
+
+    if groq_available:
+        backend = st.radio(
+            "Choose backend:",
+            ["⚡ Groq API (fast)", "🖥️ Local CPU (slow)"],
+            index=0,
+            key="backend_select",
+        )
+        use_groq = backend == "⚡ Groq API (fast)"
+
+        if use_groq:
+            st.success("✅ Groq API — أقل من ثانية")
+        else:
+            st.warning("⚠️ Local CPU — قد يأخذ دقائق")
+    else:
+        st.error("❌ GROQ_API_KEY غير موجود")
+        st.caption("أضف GROQ_API_KEY في Secrets لتفعيل Groq.")
+        use_groq = False
+
+    # Store choice in session state so models.py can read it
+    st.session_state["use_groq"] = use_groq
+
+    st.markdown("---")
+    st.caption("Groq: LLaMA 3.1 8B · محلي: DistilBERT / BART")
+
+
 # ─── Header ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="lab-header">
@@ -178,7 +204,8 @@ with tab_qa:
             if not context or not question:
                 st.warning("Please fill in the context and question.")
             else:
-                with st.spinner(f"Running QA pipeline — {QA_MODELS[selected_qa_model]['label']}…"):
+                backend_label = "Groq API ⚡" if st.session_state.get("use_groq") else f"Local — {QA_MODELS[selected_qa_model]['label']}"
+                with st.spinner(f"Running QA — {backend_label}…"):
                     result = run_qa(
                         question=question,
                         context=context,
@@ -425,7 +452,8 @@ with tab_summ:
             if not article:
                 st.warning("Please paste an article.")
             else:
-                with st.spinner(f"Running summarization — {SUMM_MODELS[selected_summ_model]['label']}…"):
+                backend_label = "Groq API ⚡" if st.session_state.get("use_groq") else f"Local — {SUMM_MODELS[selected_summ_model]['label']}"
+                with st.spinner(f"Running summarization — {backend_label}…"):
                     summary = run_summarization(article, model_id=selected_summ_model)
 
                 st.markdown("##### Generated summary")
