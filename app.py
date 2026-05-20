@@ -17,7 +17,10 @@ import streamlit as st
 
 from core.evaluator import evaluate_batch, evaluate_summaries
 from core.metrics   import decision_rationale, decision_score, qa_metrics, rouge_scores
-from core.models    import run_qa, run_summarization
+from core.models    import (
+    QA_MODELS, SUMM_MODELS,
+    run_qa, run_summarization,
+)
 from core.utils     import extract_numbers, highlight_context, normalize_answer
 from data.examples  import DECISION_FACTORS, QA_EXAMPLES, SUMM_EXAMPLES
 
@@ -86,6 +89,13 @@ mark { background:#faeeda; color:#854f0b; border-radius:3px; padding:1px 3px; fo
 .rec-pretrained { background:#e1f5ee; border-radius:12px; padding:1rem 1.25rem; }
 .rec-borderline { background:#faeeda; border-radius:12px; padding:1rem 1.25rem; }
 .rec-finetune   { background:#eeedfe; border-radius:12px; padding:1rem 1.25rem; }
+
+.model-badge {
+    background:#f1efe8; border-radius:6px;
+    padding:6px 12px; font-size:12px;
+    color:#5f5e5a; margin-bottom:8px;
+    display:inline-block;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -109,12 +119,23 @@ tab_qa, tab_summ, tab_decision = st.tabs([
 # TAB 1 — EXTRACTIVE QA
 # ════════════════════════════════════════════════════════════════════════════
 with tab_qa:
-    st.markdown("#### Model: `distilbert-base-cased-distilled-squad` · Hugging Face pipeline")
+    st.markdown("#### Extractive QA")
     st.caption(
-        "Encoder-only (DistilBERT) + QA head. "
+        "Encoder-only transformer + QA head. "
         "Span prediction: per-token start/end logits over the context. "
-        "Fine-tuned on SQuAD v1.1 — every question has an answer in the context."
+        "Fine-tuned on SQuAD — every question has an answer in the context."
     )
+
+    # ── Model selector ───────────────────────────────────────────────────────
+    selected_qa_model = st.selectbox(
+        "Select QA model",
+        options=list(QA_MODELS.keys()),
+        format_func=lambda x: QA_MODELS[x]["label"],
+        index=0,
+        key="qa_model_select",
+    )
+    st.caption(QA_MODELS[selected_qa_model]["description"])
+    st.markdown("---")
 
     mode = st.radio(
         "Mode",
@@ -151,8 +172,12 @@ with tab_qa:
             if not context or not question:
                 st.warning("Please fill in the context and question.")
             else:
-                with st.spinner("Running QA pipeline…"):
-                    result = run_qa(question=question, context=context)
+                with st.spinner(f"Running QA pipeline — {QA_MODELS[selected_qa_model]['label']}…"):
+                    result = run_qa(
+                        question=question,
+                        context=context,
+                        model_id=selected_qa_model,
+                    )
 
                 answer = result["answer"]
                 score  = result["score"]
@@ -276,9 +301,13 @@ with tab_qa:
                         progress_bar.progress(current / total)
                         status_text.caption(f"Evaluating example {current} / {total}…")
 
-                    with st.spinner("Running batch evaluation…"):
+                    with st.spinner(f"Running batch evaluation — {QA_MODELS[selected_qa_model]['label']}…"):
                         try:
-                            results = evaluate_batch(df_eval, progress_callback=update_progress)
+                            results = evaluate_batch(
+                                df_eval,
+                                progress_callback=update_progress,
+                                model_id=selected_qa_model,
+                            )
                         except ValueError as e:
                             st.error(str(e))
                             results = None
@@ -332,8 +361,8 @@ with tab_qa:
                         )
 
                         st.caption(
-                            "Methodology: SQuAD-style normalization applied before EM and Token-F1. "
-                            "Model: `distilbert-base-cased-distilled-squad`."
+                            f"Methodology: SQuAD-style normalization applied before EM and Token-F1. "
+                            f"Model: `{selected_qa_model}`."
                         )
 
 
@@ -341,11 +370,22 @@ with tab_qa:
 # TAB 2 — SUMMARIZATION
 # ════════════════════════════════════════════════════════════════════════════
 with tab_summ:
-    st.markdown("#### Model: `sshleifer/distilbart-cnn-6-6` · Hugging Face pipeline")
+    st.markdown("#### Abstractive Summarization")
     st.caption(
-        "Encoder–decoder (distilled BART fine-tuned on CNN/Daily Mail). "
+        "Encoder–decoder transformer. "
         "Generation: `num_beams=4`, `do_sample=False`, `no_repeat_ngram_size=3`."
     )
+
+    # ── Model selector ───────────────────────────────────────────────────────
+    selected_summ_model = st.selectbox(
+        "Select summarization model",
+        options=list(SUMM_MODELS.keys()),
+        format_func=lambda x: SUMM_MODELS[x]["label"],
+        index=0,
+        key="summ_model_select",
+    )
+    st.caption(SUMM_MODELS[selected_summ_model]["description"])
+    st.markdown("---")
 
     summ_mode = st.radio(
         "Summarization Mode",
@@ -379,8 +419,8 @@ with tab_summ:
             if not article:
                 st.warning("Please paste an article.")
             else:
-                with st.spinner("Running summarization pipeline…"):
-                    summary = run_summarization(article)
+                with st.spinner(f"Running summarization — {SUMM_MODELS[selected_summ_model]['label']}…"):
+                    summary = run_summarization(article, model_id=selected_summ_model)
 
                 st.markdown("##### Generated summary")
                 st.markdown(
@@ -528,11 +568,12 @@ with tab_summ:
                         progress_bar2.progress(current / total)
                         status_text2.caption(f"Summarizing article {current} / {total}…")
 
-                    with st.spinner("Running corpus summarization…"):
+                    with st.spinner(f"Running corpus summarization — {SUMM_MODELS[selected_summ_model]['label']}…"):
                         try:
                             summ_results = evaluate_summaries(
                                 df_eval_summ,
                                 progress_callback=update_summ_progress,
+                                model_id=selected_summ_model,
                             )
                         except ValueError as e:
                             st.error(str(e))
@@ -580,9 +621,9 @@ with tab_summ:
                         )
 
                         st.caption(
-                            "Methodology: ROUGE F1 · `use_stemmer=True` · "
-                            "`scorer.score(reference, predicted)` — reference first. "
-                            "Model: `sshleifer/distilbart-cnn-6-6`."
+                            f"Methodology: ROUGE F1 · `use_stemmer=True` · "
+                            f"`scorer.score(reference, predicted)` — reference first. "
+                            f"Model: `{selected_summ_model}`."
                         )
 
         elif uploaded_articles is not None and uploaded_refs is None:

@@ -11,8 +11,7 @@ from core.metrics import qa_metrics, rouge_scores
 from core.models  import run_qa, run_summarization
 
 
-def evaluate_batch(df: pd.DataFrame, progress_callback=None) -> dict:
-    """
+def evaluate_batch(df: pd.DataFrame, progress_callback=None, model_id: str = "distilbert-base-cased-distilled-squad") -> dict:    """
     Run the QA pipeline over every row in df and compute aggregate metrics.
 
     Args:
@@ -42,7 +41,7 @@ def evaluate_batch(df: pd.DataFrame, progress_callback=None) -> dict:
         context     = str(row["context"])
         gold_answer = str(row["gold_answer"])
 
-        result           = run_qa(question=question, context=context)
+        result           = run_qa(question=question, context=context, model_id=model_id)
         predicted_answer = result["answer"]
 
         m = qa_metrics(predicted_answer, gold_answer)
@@ -72,8 +71,7 @@ def evaluate_batch(df: pd.DataFrame, progress_callback=None) -> dict:
     }
 
 
-def evaluate_summaries(df: pd.DataFrame, progress_callback=None) -> dict:
-    """
+def evaluate_summaries(df: pd.DataFrame, progress_callback=None, model_id: str = "sshleifer/distilbart-cnn-6-6") -> dict:    """
     Run the summarization pipeline over every row in df and compute ROUGE.
 
     Args:
@@ -115,7 +113,7 @@ def evaluate_summaries(df: pd.DataFrame, progress_callback=None) -> dict:
         text      = str(row["text"])
         reference = str(row["reference_summary"])
 
-        predicted = run_summarization(text)
+        predicted = run_summarization(text, model_id=model_id)
         rouge     = rouge_scores(predicted=predicted, reference=reference)
 
         r1_scores.append(rouge["rouge1"]["fmeasure"])
