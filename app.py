@@ -31,6 +31,13 @@ st.write("Testing CSS...")
 st.write("CSS passed")
 st.write("Testing sidebar...")
 st.write("Testing header...")
+st.write("Testing tabs...")
+tab_qa, tab_summ, tab_decision = st.tabs([
+    "🔍  Extractive QA",
+    "📄  Summarization",
+    "⚖️  Decision Matrix",
+])
+st.write("Tabs created!")
 load_dotenv()
 
 # ─── Available models ────────────────────────────────────────────────────────
