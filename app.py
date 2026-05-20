@@ -106,7 +106,6 @@ with st.sidebar:
 
     groq_available = _is_groq()
 
-    # Collapsible backend selector
     show_selector = st.toggle("Show backend selector", value=True, key="show_backend")
 
     if show_selector:
@@ -128,12 +127,10 @@ with st.sidebar:
             st.caption("Add GROQ_API_KEY in Secrets to enable Groq.")
             use_groq = False
     else:
-        # When hidden, keep last known value or default to Groq if available
         use_groq = st.session_state.get("use_groq", groq_available)
         current = "Groq API ⚡" if use_groq else "Local CPU 🖥️"
         st.caption(f"Backend: **{current}**")
 
-    # Store choice in session state so models.py can read it
     st.session_state["use_groq"] = use_groq
 
     st.markdown("---")
@@ -167,15 +164,23 @@ with tab_qa:
         "Fine-tuned on SQuAD — every question has an answer in the context."
     )
 
-    # ── Model selector ───────────────────────────────────────────────────────
-    selected_qa_model = st.selectbox(
-        "Select QA model",
-        options=list(QA_MODELS.keys()),
-        format_func=lambda x: QA_MODELS[x]["label"],
-        index=0,
-        key="qa_model_select",
-    )
-    st.caption(QA_MODELS[selected_qa_model]["description"])
+    # ── Model selector — hidden when Groq is active ──────────────────────────
+    if st.session_state.get("use_groq"):
+        selected_qa_model = list(QA_MODELS.keys())[0]
+        st.markdown(
+            '<div class="model-badge">⚡ Groq API — LLaMA 3.1 8B Instant</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        selected_qa_model = st.selectbox(
+            "Select QA model",
+            options=list(QA_MODELS.keys()),
+            format_func=lambda x: QA_MODELS[x]["label"],
+            index=0,
+            key="qa_model_select",
+        )
+        st.caption(QA_MODELS[selected_qa_model]["description"])
+
     st.markdown("---")
 
     mode = st.radio(
@@ -418,15 +423,23 @@ with tab_summ:
         "Generation: `num_beams=4`, `do_sample=False`, `no_repeat_ngram_size=3`."
     )
 
-    # ── Model selector ───────────────────────────────────────────────────────
-    selected_summ_model = st.selectbox(
-        "Select summarization model",
-        options=list(SUMM_MODELS.keys()),
-        format_func=lambda x: SUMM_MODELS[x]["label"],
-        index=0,
-        key="summ_model_select",
-    )
-    st.caption(SUMM_MODELS[selected_summ_model]["description"])
+    # ── Model selector — hidden when Groq is active ──────────────────────────
+    if st.session_state.get("use_groq"):
+        selected_summ_model = list(SUMM_MODELS.keys())[0]
+        st.markdown(
+            '<div class="model-badge">⚡ Groq API — LLaMA 3.1 8B Instant</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        selected_summ_model = st.selectbox(
+            "Select summarization model",
+            options=list(SUMM_MODELS.keys()),
+            format_func=lambda x: SUMM_MODELS[x]["label"],
+            index=0,
+            key="summ_model_select",
+        )
+        st.caption(SUMM_MODELS[selected_summ_model]["description"])
+
     st.markdown("---")
 
     summ_mode = st.radio(

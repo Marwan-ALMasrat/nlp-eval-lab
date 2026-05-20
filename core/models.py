@@ -66,13 +66,13 @@ _GROQ_MODEL   = "llama-3.1-8b-instant"
 
 def _load_groq_keys() -> list:
     """
-    يحمّل كل مفاتيح Groq المتاحة من Secrets أو .env.
-    يدعم:
-      GROQ_API_KEY        (مفتاح واحد — للتوافق مع القديم)
-      GROQ_API_KEY_1 ... GROQ_API_KEY_N  (مفاتيح متعددة)
+    Loads all available Groq keys from Secrets or .env.
+    Supports:
+      GROQ_API_KEY        (single key — backwards compatible)
+      GROQ_API_KEY_1 ... GROQ_API_KEY_N  (multiple keys)
     """
     keys = []
-    # مفاتيح مرقّمة: GROQ_API_KEY_1, _2, ...
+    # Numbered keys: GROQ_API_KEY_1, _2, ...
     for i in range(1, 20):
         try:
             k = st.secrets.get(f"GROQ_API_KEY_{i}", "")
@@ -81,7 +81,7 @@ def _load_groq_keys() -> list:
         if k:
             keys.append(k)
 
-    # مفتاح واحد غير مرقّم كاحتياطي
+    # Single unnumbered key as fallback
     if not keys:
         try:
             k = st.secrets.get("GROQ_API_KEY", "")
@@ -94,12 +94,12 @@ def _load_groq_keys() -> list:
 
 
 def _get_current_key_index() -> int:
-    """يقرأ المؤشر الحالي من session_state."""
+    """Returns current key index from session_state."""
     return st.session_state.get("groq_key_index", 0)
 
 
 def _rotate_key(keys: list) -> int:
-    """ينتقل للمفتاح التالي ويعيد الإندكس الجديد."""
+    """Moves to the next key and returns the new index."""
     current = _get_current_key_index()
     next_index = (current + 1) % len(keys)
     st.session_state["groq_key_index"] = next_index
@@ -125,19 +125,19 @@ def _user_wants_groq() -> bool:
 
 def _groq_post(payload: dict, timeout: int = 15) -> dict:
     """
-    POST إلى Groq مع:
-    - تدوير المفاتيح تلقائياً عند 429
-    - عند انتهاء جميع المفاتيح يعود للأول ويكرر (دورات لا نهائية)
-    - انتظار تصاعدي فقط عند مفتاح واحد أو بعد دورة كاملة
+    POST to Groq with:
+    - Automatic key rotation on 429
+    - Cycles through all keys before waiting
+    - Exponential backoff only after a full round
     """
     keys = _load_groq_keys()
     if not keys:
-        raise RuntimeError("لا يوجد GROQ_API_KEY في Secrets.")
+        raise RuntimeError("No GROQ_API_KEY found in Secrets.")
 
     attempt      = 0
-    round_num    = 0   # عدد الدورات الكاملة
+    round_num    = 0
     wait         = 2.0
-    MAX_ROUNDS   = 10  # حد أقصى للدورات لتجنب الحلقة الأبدية
+    MAX_ROUNDS   = 10
 
     while round_num < MAX_ROUNDS:
         idx      = _get_current_key_index() % len(keys)
@@ -157,7 +157,7 @@ def _groq_post(payload: dict, timeout: int = 15) -> dict:
         if response.status_code == 429:
             new_idx = _rotate_key(keys)
 
-            # إذا أكملنا دورة كاملة على جميع المفاتيح
+            # Completed a full round through all keys
             if new_idx == 0:
                 round_num += 1
                 retry_after = response.headers.get("Retry-After", "")
@@ -167,15 +167,15 @@ def _groq_post(payload: dict, timeout: int = 15) -> dict:
                     except ValueError:
                         pass
                 st.info(
-                    f"⏳ كل المفاتيح وصلت للحد (دورة {round_num}/{MAX_ROUNDS}) — "
-                    f"انتظر {wait:.0f}s ثم أبدأ من جديد…"
+                    f"⏳ All keys hit rate limit (round {round_num}/{MAX_ROUNDS}) — "
+                    f"waiting {wait:.0f}s before retrying…"
                 )
                 time.sleep(wait)
                 wait = min(wait * 2, 60)
             else:
-                # مفتاح جديد متاح — انتقل فوراً
+                # New key available — switch immediately
                 if len(keys) > 1:
-                    st.info(f"⚡ المفتاح {idx+1} وصل للحد — تبديل للمفتاح {new_idx+1}/{len(keys)}…")
+                    st.info(f"⚡ Key {idx+1} hit rate limit — switching to key {new_idx+1}/{len(keys)}…")
                 time.sleep(0.3)
             continue
 
@@ -183,8 +183,8 @@ def _groq_post(payload: dict, timeout: int = 15) -> dict:
         return response.json()
 
     raise RuntimeError(
-        f"Groq: انتهت {MAX_ROUNDS} دورات كاملة على {len(keys)} مفتاح. "
-        "انتظر بضع دقائق أو أضف مفاتيح إضافية."
+        f"Groq: exhausted {MAX_ROUNDS} full rounds across {len(keys)} keys. "
+        "Wait a few minutes or add more API keys."
     )
 
 
@@ -327,13 +327,13 @@ def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dic
         except RuntimeError as e:
             st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq فشل ({e}) — جاري التشغيل محلياً.")
+            st.warning(f"Groq failed ({e}) — falling back to local.")
 
     if _is_hf_api():
         try:
             return _hf_qa(question, context, model_id)
         except Exception as e:
-            st.warning(f"HuggingFace فشل ({e}) — جاري التشغيل محلياً.")
+            st.warning(f"HuggingFace failed ({e}) — falling back to local.")
 
     pipeline = _get_qa_pipeline_local(model_id)
     return pipeline(question=question, context=context)
@@ -346,13 +346,13 @@ def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
         except RuntimeError as e:
             st.warning(str(e))
         except Exception as e:
-            st.warning(f"Groq فشل ({e}) — جاري التشغيل محلياً.")
+            st.warning(f"Groq failed ({e}) — falling back to local.")
 
     if _is_hf_api():
         try:
             return _hf_summarize(text, model_id)
         except Exception as e:
-            st.warning(f"HuggingFace فشل ({e}) — جاري التشغيل محلياً.")
+            st.warning(f"HuggingFace failed ({e}) — falling back to local.")
 
     pipeline = _get_summ_pipeline_local(model_id)
     out = pipeline(
