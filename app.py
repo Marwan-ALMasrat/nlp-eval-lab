@@ -21,6 +21,16 @@ from transformers import (
 from transformers.pipelines import QuestionAnsweringPipeline, SummarizationPipeline
 
 st.write("App loaded successfully")
+
+st.write("App loaded successfully")
+st.write("Testing CSS...")
+
+# comment out the entire CSS block temporarily
+# st.markdown("""<style>...</style>""", unsafe_allow_html=True)
+
+st.write("CSS passed")
+st.write("Testing sidebar...")
+
 load_dotenv()
 
 # ─── Available models ────────────────────────────────────────────────────────
