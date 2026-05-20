@@ -3,11 +3,11 @@ core/models.py
 ──────────────
 Model loading with dynamic model selection.
 Supports three inference modes:
-  - HuggingFace API: fastest, no local download, requires HF_TOKEN
+  - Groq API:        fastest, no local download, requires GROQ_API_KEY
+  - HuggingFace API: fast, requires HF_TOKEN
   - Local:           loads HuggingFace pipeline directly (slow on CPU)
-  - Remote (Colab):  sends requests to FastAPI server via ngrok
 
-Priority: HuggingFace API → Colab Remote → Local CPU
+Priority: Groq API → HuggingFace API → Local CPU
 """
 
 import os
@@ -62,11 +62,19 @@ SUMM_MODELS = {
 DEFAULT_QA_MODEL   = "distilbert-base-cased-distilled-squad"
 DEFAULT_SUMM_MODEL = "sshleifer/distilbart-cnn-6-6"
 
-_NGROK_HEADERS = {"ngrok-skip-browser-warning": "true"}
-_HF_API_URL = "https://router.huggingface.co/hf-inference/models"
+_HF_API_URL  = "https://router.huggingface.co/hf-inference/models"
+_GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+_GROQ_MODEL   = "llama-3.1-8b-instant"   # fast & free on Groq
 
 
-# ─── Mode detection ──────────────────────────────────────────────────────────
+# ─── Credentials ─────────────────────────────────────────────────────────────
+
+def _groq_key() -> str:
+    try:
+        return st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        return os.environ.get("GROQ_API_KEY", "")
+
 
 def _hf_token() -> str:
     try:
@@ -75,27 +83,94 @@ def _hf_token() -> str:
         return os.environ.get("HF_TOKEN", "")
 
 
-def _colab_url() -> str:
-    try:
-        return st.secrets.get("COLAB_API_URL", "")
-    except Exception:
-        return os.environ.get("COLAB_API_URL", "")
+def _is_groq() -> bool:
+    return bool(_groq_key())
 
 
 def _is_hf_api() -> bool:
     return bool(_hf_token())
 
 
-def _is_remote() -> bool:
-    return bool(_colab_url())
+# ─── Groq API inference ───────────────────────────────────────────────────────
+
+def _groq_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {_groq_key()}",
+        "Content-Type": "application/json",
+    }
 
 
-# ─── Token check (runs once at startup) ──────────────────────────────────────
+def _groq_qa(question: str, context: str) -> dict:
+    """Call Groq API for extractive QA using LLaMA."""
+    prompt = f"""You are a precise question-answering assistant.
+Extract the answer to the question from the context below.
+Return ONLY a JSON object with these fields:
+- "answer": the exact answer string extracted from the context
+- "score": confidence float between 0 and 1
+- "start": approximate character start index in context (integer)
+- "end": approximate character end index in context (integer)
 
-def _check_token() -> None:
-    """Warn in the UI if no HF_TOKEN is found."""
-    if not _hf_token():
-        st.warning("⚠️ HF_TOKEN غير موجود — سيعمل محلياً فقط (بطيء)")
+Context: {context}
+
+Question: {question}
+
+Respond with JSON only, no explanation."""
+
+    response = requests.post(
+        _GROQ_API_URL,
+        headers=_groq_headers(),
+        json={
+            "model": _GROQ_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 200,
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"].strip()
+
+    # Parse JSON response
+    import json, re
+    # Strip markdown fences if present
+    content = re.sub(r"```json|```", "", content).strip()
+    data = json.loads(content)
+
+    answer = data.get("answer", "")
+    score  = float(data.get("score", 0.9))
+
+    # Find actual character positions in context
+    start = context.find(answer)
+    if start == -1:
+        start = 0
+    end = start + len(answer)
+
+    return {"answer": answer, "score": score, "start": start, "end": end}
+
+
+def _groq_summarize(text: str) -> str:
+    """Call Groq API for abstractive summarization using LLaMA."""
+    prompt = f"""Summarize the following article in 2-3 concise sentences.
+Return only the summary, no preamble or explanation.
+
+Article:
+{text}
+
+Summary:"""
+
+    response = requests.post(
+        _GROQ_API_URL,
+        headers=_groq_headers(),
+        json={
+            "model": _GROQ_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 150,
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
 
 
 # ─── HuggingFace API inference ───────────────────────────────────────────────
@@ -105,7 +180,6 @@ def _hf_headers() -> dict:
 
 
 def _hf_qa(question: str, context: str, model_id: str) -> dict:
-    """Call HuggingFace Inference API for QA."""
     for attempt in range(3):
         response = requests.post(
             f"{_HF_API_URL}/{model_id}",
@@ -114,14 +188,11 @@ def _hf_qa(question: str, context: str, model_id: str) -> dict:
             timeout=30,
         )
         data = response.json()
-
-        # Model loading — wait and retry
         if isinstance(data, dict) and "error" in data and "loading" in data.get("error", "").lower():
             wait = data.get("estimated_time", 20)
             st.info(f"Model loading on HuggingFace servers — retrying in {int(wait)}s…")
             time.sleep(wait)
             continue
-
         response.raise_for_status()
         return {
             "answer": data.get("answer", ""),
@@ -133,7 +204,6 @@ def _hf_qa(question: str, context: str, model_id: str) -> dict:
 
 
 def _hf_summarize(text: str, model_id: str) -> str:
-    """Call HuggingFace Inference API for summarization."""
     for attempt in range(3):
         response = requests.post(
             f"{_HF_API_URL}/{model_id}",
@@ -150,13 +220,11 @@ def _hf_summarize(text: str, model_id: str) -> str:
             timeout=60,
         )
         data = response.json()
-
         if isinstance(data, dict) and "error" in data and "loading" in data.get("error", "").lower():
             wait = data.get("estimated_time", 20)
             st.info(f"Model loading on HuggingFace servers — retrying in {int(wait)}s…")
             time.sleep(wait)
             continue
-
         response.raise_for_status()
         return data[0]["summary_text"]
     raise RuntimeError("HuggingFace API unavailable after 3 attempts.")
@@ -183,7 +251,7 @@ def _get_summ_pipeline_local(model_id: str):
 def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dict:
     """
     Run extractive QA.
-    Priority: HuggingFace API → Colab Remote → Local CPU
+    Priority: Groq API → HuggingFace API → Local CPU
 
     Returns:
         {
@@ -193,26 +261,19 @@ def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dic
             "end":    int,
         }
     """
-    # 1 — HuggingFace API
+    # 1 — Groq API (fastest)
+    if _is_groq():
+        try:
+            return _groq_qa(question, context)
+        except Exception as e:
+            st.warning(f"Groq API failed ({e}) — trying next mode.")
+
+    # 2 — HuggingFace API
     if _is_hf_api():
         try:
             return _hf_qa(question, context, model_id)
         except Exception as e:
-            st.warning(f"HuggingFace API failed ({e}) — trying next mode.")
-
-    # 2 — Colab Remote
-    if _is_remote():
-        try:
-            response = requests.post(
-                f"{_colab_url()}/qa",
-                json={"question": question, "context": context, "model_id": model_id},
-                headers=_NGROK_HEADERS,
-                timeout=30,
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            st.warning(f"Remote inference failed ({e}) — falling back to local.")
+            st.warning(f"HuggingFace API failed ({e}) — falling back to local.")
 
     # 3 — Local CPU
     pipeline = _get_qa_pipeline_local(model_id)
@@ -222,34 +283,23 @@ def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dic
 def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
     """
     Run abstractive summarization.
-    Priority: HuggingFace API → Colab Remote → Local CPU
-
-    Generation settings:
-        max_length=80, min_length=20, do_sample=False,
-        num_beams=4, no_repeat_ngram_size=3
+    Priority: Groq API → HuggingFace API → Local CPU
 
     Returns the summary string.
     """
-    # 1 — HuggingFace API
+    # 1 — Groq API (fastest)
+    if _is_groq():
+        try:
+            return _groq_summarize(text)
+        except Exception as e:
+            st.warning(f"Groq API failed ({e}) — trying next mode.")
+
+    # 2 — HuggingFace API
     if _is_hf_api():
         try:
             return _hf_summarize(text, model_id)
         except Exception as e:
-            st.warning(f"HuggingFace API failed ({e}) — trying next mode.")
-
-    # 2 — Colab Remote
-    if _is_remote():
-        try:
-            response = requests.post(
-                f"{_colab_url()}/summarize",
-                json={"text": text, "model_id": model_id},
-                headers=_NGROK_HEADERS,
-                timeout=60,
-            )
-            response.raise_for_status()
-            return response.json()["summary"]
-        except Exception as e:
-            st.warning(f"Remote inference failed ({e}) — falling back to local.")
+            st.warning(f"HuggingFace API failed ({e}) — falling back to local.")
 
     # 3 — Local CPU
     pipeline = _get_summ_pipeline_local(model_id)

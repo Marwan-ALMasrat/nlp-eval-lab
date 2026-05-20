@@ -24,28 +24,7 @@ from core.models    import (
 from core.utils     import extract_numbers, highlight_context, normalize_answer
 from data.examples  import DECISION_FACTORS, QA_EXAMPLES, SUMM_EXAMPLES
 
-import streamlit as st
-token = st.secrets.get("HF_TOKEN", "NOT FOUND")
-st.write(f"Token starts with: {token[:10] if token != 'NOT FOUND' else 'NOT FOUND'}")
-
-import requests
-try:
-    r = requests.get("https://api-inference.huggingface.co", timeout=5)
-    st.write(f"Connection: {r.status_code}")
-except Exception as e:
-    st.write(f"Connection failed: {e}")
-
-try:
-    r = requests.get("https://huggingface.co", timeout=5)
-    st.write(f"HuggingFace main: {r.status_code}")
-except Exception as e:
-    st.write(f"HuggingFace main failed: {e}")
-
-try:
-    r = requests.get("https://google.com", timeout=5)
-    st.write(f"Google: {r.status_code}")
-except Exception as e:
-    st.write(f"Google failed: {e}")    
+  
 
 # ─── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
