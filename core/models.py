@@ -127,18 +127,22 @@ def _groq_post(payload: dict, timeout: int = 15) -> dict:
     """
     POST إلى Groq مع:
     - تدوير المفاتيح تلقائياً عند 429
-    - إعادة المحاولة مع انتظار تصاعدي
+    - عند انتهاء جميع المفاتيح يعود للأول ويكرر (دورات لا نهائية)
+    - انتظار تصاعدي فقط عند مفتاح واحد أو بعد دورة كاملة
     """
     keys = _load_groq_keys()
     if not keys:
         raise RuntimeError("لا يوجد GROQ_API_KEY في Secrets.")
 
-    total_attempts = len(keys) * 2  # حاول كل مفتاح مرتين
-    wait = 2.0
+    attempt      = 0
+    round_num    = 0   # عدد الدورات الكاملة
+    wait         = 2.0
+    MAX_ROUNDS   = 10  # حد أقصى للدورات لتجنب الحلقة الأبدية
 
-    for attempt in range(total_attempts):
-        idx = _get_current_key_index() % len(keys)
-        key = keys[idx]
+    while round_num < MAX_ROUNDS:
+        idx      = _get_current_key_index() % len(keys)
+        key      = keys[idx]
+        attempt += 1
 
         response = requests.post(
             _GROQ_API_URL,
@@ -152,31 +156,35 @@ def _groq_post(payload: dict, timeout: int = 15) -> dict:
 
         if response.status_code == 429:
             new_idx = _rotate_key(keys)
-            retry_after = response.headers.get("Retry-After", "")
-            if retry_after:
-                try:
-                    wait = float(retry_after)
-                except ValueError:
-                    pass
 
-            if len(keys) > 1:
+            # إذا أكملنا دورة كاملة على جميع المفاتيح
+            if new_idx == 0:
+                round_num += 1
+                retry_after = response.headers.get("Retry-After", "")
+                if retry_after:
+                    try:
+                        wait = float(retry_after)
+                    except ValueError:
+                        pass
                 st.info(
-                    f"⚡ المفتاح {idx+1} وصل للحد — تبديل للمفتاح {new_idx+1}/{len(keys)}…"
+                    f"⏳ كل المفاتيح وصلت للحد (دورة {round_num}/{MAX_ROUNDS}) — "
+                    f"انتظر {wait:.0f}s ثم أبدأ من جديد…"
                 )
-                # لا ننتظر عند التبديل — المفتاح الجديد جاهز فوراً
-                time.sleep(0.3)
-            else:
-                st.info(f"⏳ Groq rate limit — انتظر {wait:.0f}s… (محاولة {attempt+1}/{total_attempts})")
                 time.sleep(wait)
                 wait = min(wait * 2, 60)
+            else:
+                # مفتاح جديد متاح — انتقل فوراً
+                if len(keys) > 1:
+                    st.info(f"⚡ المفتاح {idx+1} وصل للحد — تبديل للمفتاح {new_idx+1}/{len(keys)}…")
+                time.sleep(0.3)
             continue
 
         response.raise_for_status()
         return response.json()
 
     raise RuntimeError(
-        f"Groq: انتهت كل المحاولات على {len(keys)} مفتاح/مفاتيح. "
-        "أضف مفاتيح إضافية أو انتظر دقيقة."
+        f"Groq: انتهت {MAX_ROUNDS} دورات كاملة على {len(keys)} مفتاح. "
+        "انتظر بضع دقائق أو أضف مفاتيح إضافية."
     )
 
 

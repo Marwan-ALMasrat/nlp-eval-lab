@@ -106,29 +106,38 @@ with st.sidebar:
 
     groq_available = _is_groq()
 
-    if groq_available:
-        backend = st.radio(
-            "Choose backend:",
-            ["⚡ Groq API (fast)", "🖥️ Local CPU (slow)"],
-            index=0,
-            key="backend_select",
-        )
-        use_groq = backend == "⚡ Groq API (fast)"
+    # Collapsible backend selector
+    show_selector = st.toggle("Show backend selector", value=True, key="show_backend")
 
-        if use_groq:
-            st.success("✅ Groq API — أقل من ثانية")
+    if show_selector:
+        if groq_available:
+            backend = st.radio(
+                "Choose backend:",
+                ["⚡ Groq API (fast)", "🖥️ Local CPU (slow)"],
+                index=0,
+                key="backend_select",
+            )
+            use_groq = backend == "⚡ Groq API (fast)"
+
+            if use_groq:
+                st.success("✅ Groq API — under 1 second")
+            else:
+                st.warning("⚠️ Local CPU — may take minutes")
         else:
-            st.warning("⚠️ Local CPU — قد يأخذ دقائق")
+            st.error("❌ GROQ_API_KEY not found")
+            st.caption("Add GROQ_API_KEY in Secrets to enable Groq.")
+            use_groq = False
     else:
-        st.error("❌ GROQ_API_KEY غير موجود")
-        st.caption("أضف GROQ_API_KEY في Secrets لتفعيل Groq.")
-        use_groq = False
+        # When hidden, keep last known value or default to Groq if available
+        use_groq = st.session_state.get("use_groq", groq_available)
+        current = "Groq API ⚡" if use_groq else "Local CPU 🖥️"
+        st.caption(f"Backend: **{current}**")
 
     # Store choice in session state so models.py can read it
     st.session_state["use_groq"] = use_groq
 
     st.markdown("---")
-    st.caption("Groq: LLaMA 3.1 8B · محلي: DistilBERT / BART")
+    st.caption("Groq: runs LLaMA 3.1 8B on Groq's LPU · Local: runs DistilBERT/BART on your CPU")
 
 
 # ─── Header ─────────────────────────────────────────────────────────────────
