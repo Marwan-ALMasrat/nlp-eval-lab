@@ -21,6 +21,11 @@ from transformers import (
 from transformers.pipelines import QuestionAnsweringPipeline, SummarizationPipeline
 
 st.write("App loaded successfully")
+try:
+    from core.models import QA_MODELS, SUMM_MODELS, run_qa, run_summarization, _is_groq
+    st.write(f"✅ Models imported: {list(QA_MODELS.keys())}")
+except Exception as e:
+    st.error(f"❌ Import error: {e}")
 
 st.write("App loaded successfully")
 st.write("Testing CSS...")
