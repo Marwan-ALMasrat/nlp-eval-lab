@@ -11,12 +11,14 @@ from core.metrics import qa_metrics, rouge_scores
 from core.models  import run_qa, run_summarization
 
 
-def evaluate_batch(df: pd.DataFrame, progress_callback=None, model_id: str = "distilbert-base-cased-distilled-squad") -> dict:    """
+def evaluate_batch(df: pd.DataFrame, progress_callback=None, model_id: str = "distilbert-base-cased-distilled-squad") -> dict:
+    """
     Run the QA pipeline over every row in df and compute aggregate metrics.
 
     Args:
         df:                DataFrame with columns: qid, question, context, gold_answer
         progress_callback: optional callable(current, total) for progress updates
+        model_id:          HuggingFace model ID for QA
 
     Returns:
         {
@@ -71,12 +73,14 @@ def evaluate_batch(df: pd.DataFrame, progress_callback=None, model_id: str = "di
     }
 
 
-def evaluate_summaries(df: pd.DataFrame, progress_callback=None, model_id: str = "sshleifer/distilbart-cnn-6-6") -> dict:    """
+def evaluate_summaries(df: pd.DataFrame, progress_callback=None, model_id: str = "sshleifer/distilbart-cnn-6-6") -> dict:
+    """
     Run the summarization pipeline over every row in df and compute ROUGE.
 
     Args:
         df:                DataFrame with columns: article_id, text, reference_summary
         progress_callback: optional callable(current, total) for progress updates
+        model_id:          HuggingFace model ID for summarization
 
     Returns:
         {
@@ -90,7 +94,7 @@ def evaluate_summaries(df: pd.DataFrame, progress_callback=None, model_id: str =
     Each prediction dict:
         {
             "article_id":        str,
-            "text_excerpt":      str,   # first 80 chars of article
+            "text_excerpt":      str,
             "reference_summary": str,
             "predicted_summary": str,
             "rouge1":            float,
