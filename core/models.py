@@ -63,7 +63,7 @@ DEFAULT_QA_MODEL   = "distilbert-base-cased-distilled-squad"
 DEFAULT_SUMM_MODEL = "sshleifer/distilbart-cnn-6-6"
 
 _NGROK_HEADERS = {"ngrok-skip-browser-warning": "true"}
-_HF_API_URL    = "https://api-inference.huggingface.co/models"
+_HF_API_URL = "https://router.huggingface.co/hf-inference/models"
 
 
 # ─── Mode detection ──────────────────────────────────────────────────────────
