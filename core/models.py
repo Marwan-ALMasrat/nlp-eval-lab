@@ -122,6 +122,10 @@ def _user_wants_groq() -> bool:
     return st.session_state.get("use_groq", True) and _is_groq()
 
 
+def _user_wants_gemini() -> bool:
+    return st.session_state.get("use_gemini", False) and _is_gemini()
+
+
 # ─── Gemini helpers ───────────────────────────────────────────────────────────
 
 def _gemini_key() -> str:
@@ -398,7 +402,7 @@ def run_qa(question: str, context: str, model_id: str = DEFAULT_QA_MODEL) -> dic
         except Exception as e:
             st.warning(f"Groq failed ({e}) — trying Gemini…")
 
-    if _is_gemini():
+    if _user_wants_gemini() or _is_gemini():
         try:
             return _gemini_qa(question, context)
         except Exception as e:
@@ -423,7 +427,7 @@ def run_summarization(text: str, model_id: str = DEFAULT_SUMM_MODEL) -> str:
         except Exception as e:
             st.warning(f"Groq failed ({e}) — trying Gemini…")
 
-    if _is_gemini():
+    if _user_wants_gemini() or _is_gemini():
         try:
             return _gemini_summarize(text)
         except Exception as e:

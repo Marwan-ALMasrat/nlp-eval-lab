@@ -20,7 +20,7 @@ from core.metrics   import decision_rationale, decision_score, qa_metrics, rouge
 from core.models    import (
     QA_MODELS, SUMM_MODELS,
     run_qa, run_summarization,
-    _is_groq,
+    _is_groq, _is_gemini,
 )
 from core.utils     import extract_numbers, highlight_context, normalize_answer
 from data.examples  import DECISION_FACTORS, QA_EXAMPLES, SUMM_EXAMPLES
@@ -104,37 +104,51 @@ mark { background:#faeeda; color:#854f0b; border-radius:3px; padding:1px 3px; fo
 with st.sidebar:
     st.markdown("### ⚙️ Inference Backend")
 
-    groq_available = _is_groq()
+    groq_available   = _is_groq()
+    gemini_available = _is_gemini()
 
     show_selector = st.toggle("Show backend selector", value=True, key="show_backend")
 
     if show_selector:
+        options = []
         if groq_available:
-            backend = st.radio(
-                "Choose backend:",
-                ["⚡ Groq API (fast)", "🖥️ Local CPU (slow)"],
-                index=0,
-                key="backend_select",
-            )
-            use_groq = backend == "⚡ Groq API (fast)"
+            options.append("⚡ Groq API (fast)")
+        if gemini_available:
+            options.append("🌟 Gemini 2.0 Flash")
+        options.append("🖥️ Local CPU (slow)")
 
-            if use_groq:
-                st.success("✅ Groq API — under 1 second")
-            else:
-                st.warning("⚠️ Local CPU — may take minutes")
+        backend = st.radio(
+            "Choose backend:",
+            options,
+            index=0,
+            key="backend_select",
+        )
+
+        use_groq   = backend == "⚡ Groq API (fast)"
+        use_gemini = backend == "🌟 Gemini 2.0 Flash"
+
+        if use_groq:
+            st.success("✅ Groq — LLaMA 3.1 8B · under 1 second")
+        elif use_gemini:
+            st.success("✅ Gemini 2.0 Flash · fast & free")
         else:
-            st.error("❌ GROQ_API_KEY not found")
-            st.caption("Add GROQ_API_KEY in Secrets to enable Groq.")
-            use_groq = False
+            st.warning("⚠️ Local CPU — may take minutes")
     else:
-        use_groq = st.session_state.get("use_groq", groq_available)
-        current = "Groq API ⚡" if use_groq else "Local CPU 🖥️"
+        use_groq   = st.session_state.get("use_groq", groq_available)
+        use_gemini = st.session_state.get("use_gemini", False)
+        if use_groq:
+            current = "Groq API ⚡"
+        elif use_gemini:
+            current = "Gemini 2.0 Flash 🌟"
+        else:
+            current = "Local CPU 🖥️"
         st.caption(f"Backend: **{current}**")
 
-    st.session_state["use_groq"] = use_groq
+    st.session_state["use_groq"]   = use_groq
+    st.session_state["use_gemini"] = use_gemini
 
     st.markdown("---")
-    st.caption("Groq: runs LLaMA 3.1 8B on Groq's LPU · Local: runs DistilBERT/BART on your CPU")
+    st.caption("Groq: LLaMA 3.1 8B · Gemini: 2.0 Flash · Local: DistilBERT/BART on CPU")
 
 
 # ─── Header ─────────────────────────────────────────────────────────────────
@@ -167,10 +181,10 @@ with tab_qa:
     # ── Model selector — hidden when Groq is active ──────────────────────────
     if st.session_state.get("use_groq"):
         selected_qa_model = list(QA_MODELS.keys())[0]
-        st.markdown(
-            '<div class="model-badge">⚡ Groq — LLaMA 3.1 8B &nbsp;|&nbsp; fallback: Gemini 2.0 Flash</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="model-badge">⚡ Groq — LLaMA 3.1 8B</div>', unsafe_allow_html=True)
+    elif st.session_state.get("use_gemini"):
+        selected_qa_model = list(QA_MODELS.keys())[0]
+        st.markdown('<div class="model-badge">🌟 Gemini 2.0 Flash</div>', unsafe_allow_html=True)
     else:
         selected_qa_model = st.selectbox(
             "Select QA model",
@@ -426,10 +440,10 @@ with tab_summ:
     # ── Model selector — hidden when Groq is active ──────────────────────────
     if st.session_state.get("use_groq"):
         selected_summ_model = list(SUMM_MODELS.keys())[0]
-        st.markdown(
-            '<div class="model-badge">⚡ Groq — LLaMA 3.1 8B &nbsp;|&nbsp; fallback: Gemini 2.0 Flash</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="model-badge">⚡ Groq — LLaMA 3.1 8B</div>', unsafe_allow_html=True)
+    elif st.session_state.get("use_gemini"):
+        selected_summ_model = list(SUMM_MODELS.keys())[0]
+        st.markdown('<div class="model-badge">🌟 Gemini 2.0 Flash</div>', unsafe_allow_html=True)
     else:
         selected_summ_model = st.selectbox(
             "Select summarization model",
